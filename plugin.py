@@ -531,11 +531,11 @@ class AutonomousPlannerEventHandler(BaseEventHandler):
 
 
 class ScheduleInjectEventHandler(BaseEventHandler):
-    """日程注入事件处理器 - 在LLM生成前注入当前日程"""
+    """日程注入事件处理器 - 在LLM调用时注入当前日程"""
 
-    event_type = EventType.ON_LLM_BEFORE_GENERATE
+    event_type = EventType.POST_LLM
     handler_name = "schedule_inject_handler"
-    handler_description = "在LLM生成前注入当前日程信息"
+    handler_description = "在LLM调用时注入当前日程信息到prompt"
     weight = 10
     intercept_message = False
 
