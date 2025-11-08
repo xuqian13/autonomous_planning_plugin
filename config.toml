@@ -1,0 +1,135 @@
+# 麦麦自主规划插件配置文件
+#
+# ℹ️ 功能说明：与本体规划系统的关系
+# ==================================================
+# MaiBot 有两层规划系统：
+#
+# 1. planner_actions（核心本体）：基础规划框架
+#    - 提供规划和动作执行的基础设施
+#    - 用于实时对话中的动作规划
+#
+# 2. autonomous_planning_plugin（本插件）：高级自主规划
+#    - 基于核心规划框架，提供更高级的功能
+#    - 长期目标管理（创建、暂停、完成、取消）
+#    - 自动生成每日/每周/每月日程（LLM智能生成）
+#    - 定时任务调度（健康检查、社交维护、学习计划）
+#
+# 功能定位：
+# - 核心规划系统：短期、实时规划（对话中的动作）
+# - 本插件：长期、自主规划（日程管理、定时任务）
+#
+# ⚠️ 重要：本插件调用核心API，不会产生冲突
+# 本插件通过标准的 Tool、EventHandler 机制工作，
+# 会自动与核心规划系统协调，不会产生冲突。
+#
+# 当前配置：已启用，提供完整的自主规划功能
+# ==================================================
+
+[plugin]
+# 是否启用自主规划插件
+# ✅ 建议启用：提供强大的自主规划和日程管理功能
+enabled = true
+
+[autonomous_planning]
+# 规划循环间隔（秒），用于检查日程生成
+# 建议值：3600秒（1小时检查一次）
+interval = 3600
+
+# 每个周期最多执行的行动数量
+# 设置为 0 表示只生成日程但不自动执行（推荐）
+# 日程仍会影响回复内容，但不会主动发消息
+max_actions_per_cycle = 0
+
+# 目标类型配置示例（可选）
+# 以下配置会在创建对应类型目标时作为默认参数
+
+[autonomous_planning.goal_types.health_check]
+# 健康检查目标的默认配置
+check_device = true
+check_plugins = false
+report_format = "summary"
+
+[autonomous_planning.goal_types.social_maintenance]
+# 社交维护目标的默认配置
+inactive_threshold_hours = 24
+greeting_type = "friendly"
+
+[autonomous_planning.goal_types.learn_topic]
+# 学习目标的默认配置
+depth = "intermediate"
+topics = ["Python", "AI"]
+
+# ===== 日程生成配置 =====
+
+[autonomous_planning.schedule]
+# 是否自动注入日程到回复的prompt
+# true: 麦麦会在回复时自然提到当前活动（推荐）
+# false: 不注入日程信息
+inject_schedule = true
+
+[autonomous_planning.schedule.preferences]
+# 作息时间
+wake_up_time = "07:30"
+sleep_time = "23:30"
+
+# 三餐时间
+breakfast_time = "08:00"
+lunch_time = "12:00"
+dinner_time = "18:00"
+
+# 学习相关
+has_classes = true
+class_time_morning = "09:00"
+class_time_afternoon = "14:00"
+study_time = "21:00"
+
+# 娱乐爱好
+entertainment_time = "19:00"
+favorite_activities = ["刷贴吧", "看动漫", "玩游戏"]
+
+# 兴趣学习
+learning_topics = ["Python编程", "游戏开发", "动漫文化"]
+
+# 社交
+social_active = true
+
+# 运动
+exercise_occasionally = true
+
+# ===== 自动日程生成配置 =====
+# 让麦麦自动在指定时间生成并应用日程
+
+[autonomous_planning.auto_schedule]
+# 检查间隔（秒），默认3600秒（1小时检查一次）
+check_interval = 3600
+
+# 自动清理旧目标（天数），保留最近N天的已完成/已取消目标
+cleanup_old_goals_days = 30
+
+# 是否自动生成每日计划
+auto_generate_daily = true
+
+# 每日计划触发时间（24小时制，格式：HH:MM）
+# 每天到达这个时间后，会自动生成今天的计划
+daily_trigger_time = "06:00"
+
+# 是否自动生成每周计划
+auto_generate_weekly = true
+
+# 每周计划触发星期（0=周一, 1=周二, ..., 6=周日）
+weekly_trigger_weekday = 0
+
+# 每周计划触发时间
+weekly_trigger_time = "07:00"
+
+# 是否自动生成每月计划
+auto_generate_monthly = true
+
+# 每月计划触发日期（1-31号）
+monthly_trigger_day = 1
+
+# 每月计划触发时间
+monthly_trigger_time = "08:00"
+
+# 是否使用LLM生成日程（强制为true，移除模板功能）
+use_llm_for_schedule = true
