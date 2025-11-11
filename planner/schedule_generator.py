@@ -93,6 +93,46 @@ class ScheduleGenerator:
 
     def __init__(self, goal_manager: GoalManager):
         self.goal_manager = goal_manager
+        self.yesterday_schedule_summary = None  # 昨日日程摘要（用于上下文）
+
+    def _load_yesterday_schedule_summary(self) -> Optional[str]:
+        """加载昨日日程摘要，用于生成今日日程的上下文"""
+        try:
+            yesterday = datetime.now() - timedelta(days=1)
+            yesterday_str = yesterday.strftime("%Y-%m-%d")
+
+            # 获取昨天的所有目标
+            goals = self.goal_manager.get_all_goals(chat_id="global")
+            yesterday_activities = []
+
+            for goal in goals:
+                # 检查目标是否有time_window（日程类型）
+                time_window = None
+                if goal.parameters and "time_window" in goal.parameters:
+                    time_window = goal.parameters["time_window"]
+                elif goal.conditions and "time_window" in goal.conditions:
+                    time_window = goal.conditions["time_window"]
+
+                if time_window:
+                    # 将分钟数转换为时间字符串
+                    start_minutes = time_window[0] if isinstance(time_window, list) else 0
+                    hour = start_minutes // 60
+                    minute = start_minutes % 60
+                    time_str = f"{hour:02d}:{minute:02d}"
+
+                    yesterday_activities.append(f"{time_str} {goal.name}: {goal.description}")
+
+            if yesterday_activities:
+                summary = "昨天我的日程:\n" + "\n".join(yesterday_activities[:10])  # 最多10条
+                logger.debug(f"加载昨日日程摘要: {len(yesterday_activities)} 条活动")
+                return summary
+            else:
+                logger.debug("未找到昨日日程")
+                return "昨天没有记录具体日程，就是普通的一天"
+
+        except Exception as e:
+            logger.warning(f"加载昨日日程失败: {e}")
+            return "昨天的事情记不太清了"
 
     async def generate_daily_schedule(
         self,
@@ -116,6 +156,9 @@ class ScheduleGenerator:
         logger.info(f"为用户 {user_id} 生成每日计划（仅使用LLM）")
 
         preferences = preferences or {}
+
+        # 加载昨日日程作为上下文
+        self.yesterday_schedule_summary = self._load_yesterday_schedule_summary()
 
         # 强制使用LLM生成个性化计划
         schedule_items = await self._generate_schedule_with_llm(
@@ -455,18 +498,18 @@ class ScheduleGenerator:
 
     def _validate_schedule_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        验证日程项的完整性和有效性，并去除时间重叠的项
+        验证日程项的完整性和有效性（宽松版本）
 
         Args:
             items: 从LLM返回的日程项列表
 
         Returns:
-            验证通过且无时间冲突的日程项列表
+            验证通过的日程项列表
         """
-        # 必需字段
-        required_fields = ["name", "description", "goal_type", "priority"]
+        # 必需字段（宽松：只要求name和goal_type）
+        required_fields = ["name", "goal_type"]
 
-        # 有效的目标类型
+        # 有效的目标类型（扩展：允许更多类型）
         valid_goal_types = [
             "daily_routine",  # 日常作息
             "meal",           # 吃饭
@@ -477,6 +520,8 @@ class ScheduleGenerator:
             "learn_topic",    # 兴趣学习
             "health_check",   # 系统检查
             "custom",         # 自定义
+            "rest",           # 休息
+            "free_time",      # 自由时间
         ]
 
         # 有效的优先级
@@ -486,23 +531,25 @@ class ScheduleGenerator:
         skipped_count = 0
 
         for idx, item in enumerate(items):
-            # 检查必需字段
+            # 检查必需字段（只检查最基本的）
             missing_fields = [f for f in required_fields if f not in item or not item[f]]
             if missing_fields:
                 logger.warning(f"跳过第 {idx + 1} 项：缺少必需字段 {missing_fields}")
                 skipped_count += 1
                 continue
 
-            # 验证goal_type是否有效
-            if item["goal_type"] not in valid_goal_types:
-                logger.warning(f"跳过第 {idx + 1} 项：无效的goal_type '{item['goal_type']}'")
-                skipped_count += 1
-                continue
+            # 自动补全description（如果缺失）
+            if "description" not in item or not item["description"]:
+                item["description"] = item["name"]  # 用name作为默认description
 
-            # 验证priority是否有效
-            if item["priority"] not in valid_priorities:
-                logger.warning(f"第 {idx + 1} 项：无效的priority '{item['priority']}'，使用默认值 'medium'")
-                item["priority"] = "medium"
+            # 验证goal_type，不严格拒绝（宽松处理）
+            if item["goal_type"] not in valid_goal_types:
+                logger.debug(f"第 {idx + 1} 项：非标准goal_type '{item['goal_type']}'，归类为custom")
+                item["goal_type"] = "custom"  # 非标准类型归为custom
+
+            # 自动补全priority（如果缺失或无效）
+            if "priority" not in item or item["priority"] not in valid_priorities:
+                item["priority"] = "medium"  # 默认中等优先级
 
             # 验证time_slot格式（如果提供）
             if "time_slot" in item and item["time_slot"]:
@@ -516,19 +563,23 @@ class ScheduleGenerator:
                 try:
                     interval = float(item["interval_hours"])
                     if interval <= 0:
-                        logger.warning(f"第 {idx + 1} 项：interval_hours必须大于0，将忽略")
-                        item["interval_hours"] = None
+                        item["interval_hours"] = 24  # 默认每天一次
                 except (ValueError, TypeError):
-                    logger.warning(f"第 {idx + 1} 项：无效的interval_hours '{item['interval_hours']}'，将忽略")
-                    item["interval_hours"] = None
+                    item["interval_hours"] = 24  # 默认每天一次
+
+            # 自动补全parameters和conditions（如果缺失）
+            if "parameters" not in item:
+                item["parameters"] = {}
+            if "conditions" not in item:
+                item["conditions"] = {}
 
             # 通过验证
             valid_items.append(item)
 
         if skipped_count > 0:
-            logger.warning(f"共跳过 {skipped_count} 个无效日程项")
+            logger.info(f"⚠️  跳过 {skipped_count} 个无效日程项（缺少基本信息）")
 
-        # 去除时间重叠的项
+        # 去除时间重叠的项（宽松版本）
         deduped_items = self._remove_time_conflicts(valid_items)
 
         return deduped_items
@@ -614,17 +665,17 @@ class ScheduleGenerator:
         preferences: Dict[str, Any],
         max_retries: int = 3
     ) -> List[ScheduleItem]:
-        """使用LLM生成个性化日程（带重试机制）"""
+        """使用LLM生成个性化日程（带重试机制，使用replyer模型）"""
         for attempt in range(max_retries):
             try:
                 logger.info(f"使用 LLM 生成 {schedule_type.value} 日程 (尝试 {attempt + 1}/{max_retries})")
 
-                # 获取可用模型
+                # 获取可用模型 - 使用回复模型（replyer）而不是工具模型
                 models = llm_api.get_available_models()
-                model_config = models.get("utils")
+                model_config = models.get("replyer")
 
                 if not model_config:
-                    raise RuntimeError("未找到 'utils' 模型配置，无法生成日程")
+                    raise RuntimeError("未找到 'replyer' 模型配置，无法生成日程")
 
                 # 构建提示词
                 prompt = self._build_schedule_prompt(schedule_type, preferences)
@@ -727,7 +778,7 @@ class ScheduleGenerator:
                     raise RuntimeError(f"重试 {max_retries} 次后仍失败: {error_msg}")
 
     def _build_schedule_prompt(self, schedule_type: ScheduleType, preferences: Dict[str, Any]) -> str:
-        """构建日程生成提示词（优化版，融合人格配置和每日多样性）"""
+        """构建日程生成提示词（v2优化版：更灵活、更人性化、有上下文）"""
         # 获取人格配置
         personality = config_api.get_global_config("personality.personality", "是一个女大学生")
         reply_style = config_api.get_global_config("personality.reply_style", "")
@@ -736,18 +787,52 @@ class ScheduleGenerator:
         state_probability = config_api.get_global_config("personality.state_probability", 0.0)
 
         # 随机选择人格状态（增加多样性）
+        current_mood = personality
         if states and random.random() < state_probability:
-            personality = random.choice(states)
-            logger.debug(f"使用随机人格状态: {personality}")
+            current_mood = random.choice(states)
+            logger.debug(f"使用随机人格状态: {current_mood}")
 
-        # 获取当前日期和星期（用于每日多样性）
+        # 获取当前日期和星期
         today = datetime.now()
         date_str = today.strftime("%Y-%m-%d")
         weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
         weekday = weekday_names[today.weekday()]
+        is_weekend = today.weekday() >= 5  # 周六日
 
-        # 生成"心情指数"（基于日期的确定性随机数，用于增加日程变化）
-        mood_index = abs(hash(date_str)) % 100
+        # 生成"心情指数"和"活力值"（基于日期的确定性随机数，每天不同）
+        mood_seed = abs(hash(date_str)) % 100
+        energy_level = abs(hash(date_str + "energy")) % 100
+
+        # 根据心情和活力生成当天的"小状态"
+        mood_feelings = []
+        if energy_level > 70:
+            mood_feelings.extend(["精神满满", "活力充沛", "状态不错"])
+        elif energy_level > 40:
+            mood_feelings.extend(["正常水平", "还行吧", "一般般"])
+        else:
+            mood_feelings.extend(["有点困", "不太想动", "懒洋洋的"])
+
+        if mood_seed > 70:
+            mood_feelings.extend(["心情还挺好", "今天挺开心"])
+        elif mood_seed > 40:
+            mood_feelings.extend(["心情一般", "平平淡淡"])
+        else:
+            mood_feelings.extend(["有点烦", "心情不太好"])
+
+        today_feeling = random.choice(mood_feelings)
+
+        # 随机选择一些"每日小想法"
+        daily_thoughts = [
+            "想早点睡，养足精神",
+            "今天想多花点时间做自己喜欢的事",
+            "有点社恐，不太想出门",
+            "想找点有意思的事做",
+            "就平平淡淡过一天吧",
+            "想摸鱼，不想干正事",
+            "要努力学习了",
+            "想好好放松一下",
+        ]
+        daily_theme = random.choice(daily_thoughts)
 
         type_name = {
             ScheduleType.DAILY: "每日",
@@ -755,63 +840,123 @@ class ScheduleGenerator:
             ScheduleType.MONTHLY: "每月"
         }[schedule_type]
 
-        # 根据preferences动态构建活动建议
-        activity_suggestions = []
+        # 根据preferences动态构建活动建议（更自然的表达）
+        lifestyle_hints = []
         if preferences.get("wake_up_time"):
-            activity_suggestions.append(f"起床时间: {preferences['wake_up_time']}")
+            lifestyle_hints.append(f"一般{preferences['wake_up_time']}起床")
         if preferences.get("sleep_time"):
-            activity_suggestions.append(f"睡觉时间: {preferences['sleep_time']}")
+            lifestyle_hints.append(f"{preferences['sleep_time']}左右睡觉")
         if preferences.get("breakfast_time"):
-            activity_suggestions.append(f"早餐: {preferences['breakfast_time']}")
+            lifestyle_hints.append(f"早餐时间{preferences['breakfast_time']}")
         if preferences.get("lunch_time"):
-            activity_suggestions.append(f"午餐: {preferences['lunch_time']}")
+            lifestyle_hints.append(f"午饭{preferences['lunch_time']}")
         if preferences.get("dinner_time"):
-            activity_suggestions.append(f"晚餐: {preferences['dinner_time']}")
+            lifestyle_hints.append(f"晚饭{preferences['dinner_time']}")
         if preferences.get("has_classes"):
-            activity_suggestions.append(f"上课: 上午{preferences.get('class_time_morning', '09:00')}, 下午{preferences.get('class_time_afternoon', '14:00')}")
-        if preferences.get("study_time"):
-            activity_suggestions.append(f"学习: {preferences['study_time']}")
-        if preferences.get("entertainment_time"):
-            activity_suggestions.append(f"娱乐: {preferences['entertainment_time']}")
+            if is_weekend:
+                lifestyle_hints.append("周末没课，可以睡懒觉")
+            else:
+                lifestyle_hints.append(f"上午{preferences.get('class_time_morning', '09:00')}有课")
+                if preferences.get('class_time_afternoon'):
+                    lifestyle_hints.append(f"下午{preferences['class_time_afternoon']}也有课")
         if preferences.get("favorite_activities"):
-            activity_suggestions.append(f"喜欢: {', '.join(preferences['favorite_activities'][:3])}")
+            activities = ', '.join(preferences['favorite_activities'][:3])
+            lifestyle_hints.append(f"平时喜欢{activities}")
 
-        suggestions_text = "\n".join([f"  {s}" for s in activity_suggestions]) if activity_suggestions else "  参考正常大学生作息"
+        lifestyle_text = "、".join(lifestyle_hints) if lifestyle_hints else "普通大学生作息"
 
-        prompt = f"""你{personality}
+        # 昨日日程上下文
+        yesterday_context = self.yesterday_schedule_summary or "昨天没记录，就是普通的一天"
 
-今天是 {date_str} {weekday}，心情指数 {mood_index}/100。
+        # 获取bot的完整人设信息
+        bot_name = config_api.get_global_config("bot.nickname", "麦麦")
 
-【你的特点】
-- 表达方式：{reply_style if reply_style else "随意自然，像普通大学生"}
-- 兴趣爱好：{interest if interest else "日常生活"}
+        # 构建更自然、更灵活的提示词
+        prompt = f"""你是{bot_name}，{current_mood}
+
+【你的完整人设】
+{personality}
+
+【你的表达风格】
+{reply_style if reply_style else "自然随意"}
+
+【你的兴趣爱好】
+{interest if interest else "日常生活"}
+
+---
+
+今天是 {date_str} {weekday}{"，周末耶！" if is_weekend else ""}。
+
+{yesterday_context}
+
+【今天的状态】
+- 心情: {mood_seed}/100
+- 活力: {energy_level}/100
+- 今天感觉: {today_feeling}
+- 今天想: {daily_theme}
+
+【你的生活习惯】
+{lifestyle_text}
 
 【任务】
-为今天生成{type_name}生活日程。日程描述要用你自己的说话风格，像是自己给自己做的计划。
+根据你的人设、兴趣和表达风格，为今天推测一下你详细的日程安排：
+- 从起床到睡觉，覆盖一整天的活动
+- 精确到每半小时到1小时，把一天安排得比较充实
+- 描述要详细一些，可以包括你在做什么、在想什么、有什么感受
+- 用你自己的说话方式，有小情绪、小想法、小吐槽
+- 根据今天的心情和状态，灵活安排
+- **重要**：结合你的兴趣爱好安排活动（比如你喜欢的事情可以多安排点时间）
+- 可以有一些"摸鱼"、"发呆"、"自由时间"这种日常活动
 
-【用户偏好】
-{suggestions_text}
+【可用活动类型】
+- daily_routine: 作息（睡觉、起床、洗漱等）
+- meal: 吃饭
+- study: 学习（上课、自习等）
+- entertainment: 娱乐（看剧、玩游戏等）
+- social_maintenance: 社交
+- exercise: 运动
+- learn_topic: 兴趣学习
+- custom: 其他任何活动
 
-【目标类型】daily_routine(作息) meal(吃饭) study(学习) entertainment(娱乐) social_maintenance(社交) exercise(运动) learn_topic(兴趣学习) custom(其他)
-
-【输出格式】返回JSON（严格按此格式）：
+【输出JSON格式】
 {{
   "schedule_items": [
-    {{"name":"睡觉","description":"在床上躺尸中","goal_type":"daily_routine","priority":"high","time_slot":"00:00","interval_hours":24,"parameters":{{}},"conditions":{{}}}},
-    {{"name":"起床","description":"新的一天开始啦","goal_type":"daily_routine","priority":"medium","time_slot":"07:00","interval_hours":24,"parameters":{{}},"conditions":{{}}}},
-    ...（继续按时间顺序，无重叠，覆盖0-24点）
+    {{"name":"睡觉","description":"躺床上翻来覆去，脑子里乱七八糟的想了一堆事，后来做了个奇怪的梦","goal_type":"daily_routine","priority":"high","time_slot":"00:00","interval_hours":24,"parameters":{{}},"conditions":{{}}}},
+    {{"name":"起床","description":"今天起床很晚，都怪昨天熬夜了，闹钟响了好几次才爬起来，整个人迷迷糊糊的","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","interval_hours":24,"parameters":{{}},"conditions":{{}}}},
+    {{"name":"洗漱","description":"刷牙的时候对着镜子发呆，突然想起来今天还有作业没交，完了完了","goal_type":"daily_routine","priority":"medium","time_slot":"07:45","interval_hours":24,"parameters":{{}},"conditions":{{}}}},
+    {{"name":"早饭","description":"去食堂看了一圈，又是包子豆浆，吃腻了但也没别的选择，随便吃点得了","goal_type":"meal","priority":"medium","time_slot":"08:00","interval_hours":24,"parameters":{{}},"conditions":{{}}}},
+    {{"name":"课前准备","description":"回宿舍整理东西，检查了下作业，还好昨天赶出来了，差点就忘了带","goal_type":"study","priority":"medium","time_slot":"08:30","interval_hours":24,"parameters":{{}},"conditions":{{}}}},
+    ...（继续按时间顺序，覆盖全天）
   ]
 }}
 
 【要求】
-1. 严格JSON格式，无注释
-2. 真实大学生生活，包含：睡觉、起床、洗漱、三餐、学习、娱乐、运动、社交等
-3. 覆盖全天24小时，time_slot是开始时间(HH:MM格式)
-4. 时间按顺序递增，不能重叠
-5. 生成15-20个活动，每个持续0.5-3小时
-6. priority: high/medium/low
-7. 描述用你自己的风格，平淡简短
-8. 根据{weekday}调整安排，每天内容有所不同
+1. **严格JSON格式**，不要有注释
+2. **详细程度（重要）**：
+   - 覆盖全天，从起床到睡觉的主要活动
+   - 生成15-20个活动项，精确到每半小时到1小时
+   - 每个活动的description要详细（40-60字），用叙述的方式写，不要用"动作+（想法）"的格式
+3. **叙述风格（重要）**：
+   - description要像在讲故事一样，自然流畅地叙述
+   - 例如："今天起床很晚，都怪昨天熬夜了，闹钟响了好几次才爬起来"
+   - 不要写成："起床（还想再睡会，但闹钟一直响）" ❌
+   - 要写成自然的叙述，包括在做什么、想什么、有什么感受
+4. **真实感**：
+   - 像真人叙述自己的一天
+   - 可以有"摸鱼"、"发呆"、"刷手机"等日常活动
+   - 可以吐槽、可以期待、可以抱怨
+5. **人设风格（重要）**：
+   - **必须用你自己的说话风格**，参考上面的【你的表达风格】
+   - 每个描述都要不一样，有变化，有细节
+   - 符合你的人设和性格（地雷女、毒舌、有梗）
+6. **时间安排**：
+   - time_slot按时间递增，不重叠
+   - 每个活动间隔30分钟-2小时
+7. **星期特色**：{weekday}要体现（{"周末可以睡懒觉、多娱乐" if is_weekend else "工作日要上课学习"}）
+8. **心情影响**：心情{mood_seed}/100，活力{energy_level}/100，要体现在叙述中
+9. **兴趣体现**：根据你的兴趣爱好安排相关活动
+
+记住：description要像日记一样叙述（50字左右），用你自己的语气，自然流畅地讲述一天在干什么、想什么！
 """
 
         return prompt

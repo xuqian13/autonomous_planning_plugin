@@ -27,6 +27,7 @@ from .planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
 from .planner.schedule_generator import ScheduleGenerator, ScheduleType
 from .planner.auto_schedule_manager import AutoScheduleManager
 from .actions.schedule_action import ScheduleAction
+from .utils.schedule_image_generator import ScheduleImageGenerator
 
 logger = get_logger("autonomous_planning")
 
@@ -308,8 +309,18 @@ class GenerateScheduleTool(BaseTool):
         """执行工具"""
         try:
             schedule_type_str = function_args.get("schedule_type", "daily")
-            preferences = function_args.get("preferences", {})
+            preferences_raw = function_args.get("preferences", {})
             auto_apply = function_args.get("auto_apply", True)  # 默认自动应用日程
+
+            # 解析preferences（可能是JSON字符串）
+            if isinstance(preferences_raw, str):
+                try:
+                    preferences = json.loads(preferences_raw) if preferences_raw else {}
+                except json.JSONDecodeError:
+                    logger.warning(f"preferences解析失败，使用空字典: {preferences_raw}")
+                    preferences = {}
+            else:
+                preferences = preferences_raw if preferences_raw else {}
 
             # 强制使用全局chat_id
             chat_id = "global"
@@ -829,7 +840,7 @@ class PlanningCommand(BaseCommand):
                     await self.send_text(summary)
 
         elif subcommand == "list":
-            # 列出目标 - 详细格式
+            # 列出目标 - 图片格式
             goal_manager = get_goal_manager()
             goals = goal_manager.get_all_goals()
 
@@ -858,8 +869,8 @@ class PlanningCommand(BaseCommand):
 
                     schedule_goals.sort(key=get_time_window)
 
-                    messages = ["📅 今日日程详情\n"]
-
+                    # 准备图片数据
+                    schedule_items = []
                     for goal in schedule_goals:
                         # 向后兼容地获取time_window
                         time_window = None
@@ -888,14 +899,33 @@ class PlanningCommand(BaseCommand):
                             end_hour = end_minutes // 60
                             end_min = end_minutes % 60
 
-                            # 详细格式：时间 + 名称 + 描述（对齐）
                             time_str = f"{start_hour:02d}:{start_min:02d}-{end_hour:02d}:{end_min:02d}"
-                            name_str = goal.name.ljust(12)  # 名称占12个字符宽度
-                            desc_str = goal.description
 
-                            messages.append(f"  ⏰ {time_str}  {name_str} {desc_str}")
+                            schedule_items.append({
+                                "time": time_str,
+                                "name": goal.name,
+                                "description": goal.description,
+                                "goal_type": goal.goal_type
+                            })
 
-                    await self.send_text("\n".join(messages))
+                    # 生成图片
+                    try:
+                        today = datetime.now().strftime("%Y-%m-%d %A")
+                        img_bytes, img_base64 = ScheduleImageGenerator.generate_schedule_image(
+                            title=f"📅 今日日程 {today}",
+                            schedule_items=schedule_items
+                        )
+                        await self.send_image(img_base64)
+                    except Exception as e:
+                        logger.error(f"生成日程图片失败: {e}", exc_info=True)
+                        # 降级到文本输出
+                        messages = ["📅 今日日程详情\n"]
+                        for item in schedule_items:
+                            messages.append(f"  ⏰ {item['time']}  {item['name']}")
+                            messages.append(f"     {item['description']}")
+                            messages.append("")
+                        await self.send_text("\n".join(messages))
+
                 else:
                     # 没有日程目标，显示普通列表
                     messages = ["📋 所有目标:\n"]
