@@ -749,6 +749,111 @@ class PlanningCommand(BaseCommand):
     command_description = "麦麦自主规划系统管理命令"
     command_pattern = r"(?P<planning_cmd>^/(plan|规划).*$)"
 
+    def _get_today_schedule_goals(self, goal_manager) -> List:
+        """
+        获取今天的日程目标（带 time_window 的目标）
+
+        Args:
+            goal_manager: 目标管理器实例
+
+        Returns:
+            今天创建的日程目标列表
+        """
+        goals = goal_manager.get_all_goals()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        schedule_goals = []
+
+        for g in goals:
+            # 优先从parameters读取time_window，其次从conditions读取
+            has_time_window = False
+            if g.parameters and "time_window" in g.parameters:
+                has_time_window = True
+            elif g.conditions and "time_window" in g.conditions:
+                has_time_window = True
+
+            # 只显示今天创建的日程
+            if has_time_window:
+                goal_date = None
+                if g.created_at:
+                    try:
+                        if isinstance(g.created_at, str):
+                            goal_date = g.created_at.split("T")[0]
+                        else:
+                            goal_date = g.created_at.strftime("%Y-%m-%d")
+                    except Exception as e:
+                        logger.warning(f"解析目标创建时间失败: {g.created_at} - {e}")
+
+                # 只添加今天创建的日程目标
+                if goal_date == today_str:
+                    schedule_goals.append(g)
+
+        return schedule_goals
+
+    def _sort_schedule_goals(self, goals: List) -> List:
+        """
+        按时间排序日程目标
+
+        Args:
+            goals: 日程目标列表
+
+        Returns:
+            排序后的日程目标列表
+        """
+        def get_time_window(g):
+            tw = (g.parameters.get("time_window") if g.parameters else None) or \
+                 (g.conditions.get("time_window") if g.conditions else None) or [0]
+            return tw[0] if tw else 0
+
+        return sorted(goals, key=get_time_window)
+
+    def _format_time_from_minutes(self, minutes: int) -> str:
+        """
+        将分钟数转换为时间字符串
+
+        Args:
+            minutes: 分钟数（从 00:00 开始）
+
+        Returns:
+            格式化的时间字符串，如 "09:30"
+        """
+        hour = minutes // 60
+        minute = minutes % 60
+        return f"{hour:02d}:{minute:02d}"
+
+    def _get_time_window_from_goal(self, goal) -> tuple:
+        """
+        从目标中提取时间窗口（向后兼容）
+
+        Args:
+            goal: 目标对象
+
+        Returns:
+            (start_minutes, end_minutes) 元组
+        """
+        time_window = None
+        if goal.parameters and "time_window" in goal.parameters:
+            time_window = goal.parameters.get("time_window", [0, 0])
+        elif goal.conditions and "time_window" in goal.conditions:
+            time_window = goal.conditions.get("time_window", [0, 0])
+
+        if not time_window:
+            return (0, 60)
+
+        start_val = time_window[0] if len(time_window) > 0 else 0
+        end_val = time_window[1] if len(time_window) > 1 else start_val + 60
+
+        # 判断格式并转换为分钟
+        if end_val <= 24:
+            # 旧格式：小时
+            start_minutes = start_val * 60
+            end_minutes = end_val * 60
+        else:
+            # 新格式：分钟
+            start_minutes = start_val
+            end_minutes = end_val
+
+        return (start_minutes, end_minutes)
+
     async def execute(self) -> Tuple[bool, str, bool]:
         """执行命令"""
         command_text = self.matched_groups.get("planning_cmd", "").strip()
@@ -763,174 +868,81 @@ class PlanningCommand(BaseCommand):
         if subcommand == "status":
             # 显示状态 - 简洁的时间线格式
             goal_manager = get_goal_manager()
-            goals = goal_manager.get_all_goals()
+            schedule_goals = self._get_today_schedule_goals(goal_manager)
 
-            if not goals:
-                await self.send_text("📋 当前没有任何目标")
+            if not schedule_goals:
+                await self.send_text("📋 今天还没有日程安排\n\n💡 提示：对我说\"帮我生成今天的日程\"来自动创建")
             else:
-                # 检测日程类型的目标（向后兼容）
-                schedule_goals = []
-                for g in goals:
-                    # 优先从parameters读取time_window，其次从conditions读取
-                    has_time_window = False
-                    if g.parameters and "time_window" in g.parameters:
-                        has_time_window = True
-                    elif g.conditions and "time_window" in g.conditions:
-                        has_time_window = True
+                # 按时间排序
+                schedule_goals = self._sort_schedule_goals(schedule_goals)
 
-                    if has_time_window:
-                        schedule_goals.append(g)
+                messages = ["📅 今日日程\n"]
 
-                if schedule_goals:
-                    # 按时间排序
-                    def get_time_window(g):
-                        tw = (g.parameters.get("time_window") if g.parameters else None) or \
-                             (g.conditions.get("time_window") if g.conditions else None) or [0]
-                        return tw[0] if tw else 0
+                for goal in schedule_goals:
+                    # 获取时间窗口
+                    start_minutes, end_minutes = self._get_time_window_from_goal(goal)
 
-                    schedule_goals.sort(key=get_time_window)
+                    # 转换为时间字符串
+                    start_time = self._format_time_from_minutes(start_minutes)
+                    end_time = self._format_time_from_minutes(end_minutes)
 
-                    messages = ["📅 今日日程\n"]
+                    # 目标类型emoji
+                    type_emoji = {
+                        "meal": "🍽️",
+                        "study": "📚",
+                        "entertainment": "🎮",
+                        "daily_routine": "🏠",
+                        "social_maintenance": "💬",
+                        "learn_topic": "📖",
+                    }.get(goal.goal_type, "📌")
 
-                    for goal in schedule_goals:
-                        # 向后兼容地获取time_window
-                        time_window = None
-                        if goal.parameters and "time_window" in goal.parameters:
-                            time_window = goal.parameters.get("time_window", [0, 0])
-                        elif goal.conditions and "time_window" in goal.conditions:
-                            time_window = goal.conditions.get("time_window", [0, 0])
+                    # 简洁格式：时间 + emoji + 名称
+                    messages.append(f"{start_time}-{end_time} {type_emoji} {goal.name}")
 
-                        if time_window:
-                            start_val = time_window[0] if len(time_window) > 0 else 0
-                            end_val = time_window[1] if len(time_window) > 1 else start_val + 60
-
-                            # 判断格式并转换为分钟
-                            if end_val <= 24:
-                                # 旧格式：小时
-                                start_minutes = start_val * 60
-                                end_minutes = end_val * 60
-                            else:
-                                # 新格式：分钟
-                                start_minutes = start_val
-                                end_minutes = end_val
-
-                            # 转换为时:分
-                            start_hour = start_minutes // 60
-                            start_min = start_minutes % 60
-                            end_hour = end_minutes // 60
-                            end_min = end_minutes % 60
-
-                            # 目标类型emoji
-                            type_emoji = {
-                                "meal": "🍽️",
-                                "study": "📚",
-                                "entertainment": "🎮",
-                                "daily_routine": "🏠",
-                                "social_maintenance": "💬",
-                                "learn_topic": "📖",
-                            }.get(goal.goal_type, "📌")
-
-                            # 简洁格式：时间 + emoji + 名称
-                            messages.append(f"{start_hour:02d}:{start_min:02d}-{end_hour:02d}:{end_min:02d} {type_emoji} {goal.name}")
-
-                    await self.send_text("\n".join(messages))
-                else:
-                    # 如果没有日程目标，显示原有的统计摘要
-                    summary = goal_manager.get_goals_summary()
-                    await self.send_text(summary)
+                await self.send_text("\n".join(messages))
 
         elif subcommand == "list":
             # 列出目标 - 图片格式
             goal_manager = get_goal_manager()
-            goals = goal_manager.get_all_goals()
+            schedule_goals = self._get_today_schedule_goals(goal_manager)
 
-            if not goals:
-                await self.send_text("📋 当前没有任何目标")
+            if not schedule_goals:
+                await self.send_text("📋 今天还没有日程安排\n\n💡 提示：对我说\"帮我生成今天的日程\"来自动创建")
             else:
-                # 检测日程类型的目标（向后兼容）
-                schedule_goals = []
-                for g in goals:
-                    # 优先从parameters读取time_window，其次从conditions读取
-                    has_time_window = False
-                    if g.parameters and "time_window" in g.parameters:
-                        has_time_window = True
-                    elif g.conditions and "time_window" in g.conditions:
-                        has_time_window = True
+                # 按时间排序
+                schedule_goals = self._sort_schedule_goals(schedule_goals)
 
-                    if has_time_window:
-                        schedule_goals.append(g)
+                # 准备图片数据
+                schedule_items = []
+                for goal in schedule_goals:
+                    # 获取时间窗口
+                    start_minutes, end_minutes = self._get_time_window_from_goal(goal)
 
-                if schedule_goals:
-                    # 按时间排序
-                    def get_time_window(g):
-                        tw = (g.parameters.get("time_window") if g.parameters else None) or \
-                             (g.conditions.get("time_window") if g.conditions else None) or [0]
-                        return tw[0] if tw else 0
+                    # 转换为时间字符串
+                    time_str = f"{self._format_time_from_minutes(start_minutes)}-{self._format_time_from_minutes(end_minutes)}"
 
-                    schedule_goals.sort(key=get_time_window)
+                    schedule_items.append({
+                        "time": time_str,
+                        "name": goal.name,
+                        "description": goal.description,
+                        "goal_type": goal.goal_type
+                    })
 
-                    # 准备图片数据
-                    schedule_items = []
-                    for goal in schedule_goals:
-                        # 向后兼容地获取time_window
-                        time_window = None
-                        if goal.parameters and "time_window" in goal.parameters:
-                            time_window = goal.parameters.get("time_window", [0, 0])
-                        elif goal.conditions and "time_window" in goal.conditions:
-                            time_window = goal.conditions.get("time_window", [0, 0])
-
-                        if time_window:
-                            start_val = time_window[0] if len(time_window) > 0 else 0
-                            end_val = time_window[1] if len(time_window) > 1 else start_val + 60
-
-                            # 判断格式并转换为分钟
-                            if end_val <= 24:
-                                # 旧格式：小时
-                                start_minutes = start_val * 60
-                                end_minutes = end_val * 60
-                            else:
-                                # 新格式：分钟
-                                start_minutes = start_val
-                                end_minutes = end_val
-
-                            # 转换为时:分
-                            start_hour = start_minutes // 60
-                            start_min = start_minutes % 60
-                            end_hour = end_minutes // 60
-                            end_min = end_minutes % 60
-
-                            time_str = f"{start_hour:02d}:{start_min:02d}-{end_hour:02d}:{end_min:02d}"
-
-                            schedule_items.append({
-                                "time": time_str,
-                                "name": goal.name,
-                                "description": goal.description,
-                                "goal_type": goal.goal_type
-                            })
-
-                    # 生成图片
-                    try:
-                        today = datetime.now().strftime("%Y-%m-%d %A")
-                        img_bytes, img_base64 = ScheduleImageGenerator.generate_schedule_image(
-                            title=f"📅 今日日程 {today}",
-                            schedule_items=schedule_items
-                        )
-                        await self.send_image(img_base64)
-                    except Exception as e:
-                        logger.error(f"生成日程图片失败: {e}", exc_info=True)
-                        # 降级到文本输出
-                        messages = ["📅 今日日程详情\n"]
-                        for item in schedule_items:
-                            messages.append(f"  ⏰ {item['time']}  {item['name']}")
-                            messages.append(f"     {item['description']}")
-                            messages.append("")
-                        await self.send_text("\n".join(messages))
-
-                else:
-                    # 没有日程目标，显示普通列表
-                    messages = ["📋 所有目标:\n"]
-                    for idx, goal in enumerate(goals, 1):
-                        messages.append(f"[{idx}] {goal.get_summary()}")
+                # 生成图片
+                try:
+                    today = datetime.now().strftime("%Y-%m-%d %A")
+                    img_bytes, img_base64 = ScheduleImageGenerator.generate_schedule_image(
+                        title=f"📅 今日日程 {today}",
+                        schedule_items=schedule_items
+                    )
+                    await self.send_image(img_base64)
+                except Exception as e:
+                    logger.error(f"生成日程图片失败: {e}", exc_info=True)
+                    # 降级到文本输出
+                    messages = ["📅 今日日程详情\n"]
+                    for item in schedule_items:
+                        messages.append(f"  ⏰ {item['time']}  {item['name']}")
+                        messages.append(f"     {item['description']}")
                         messages.append("")
                     await self.send_text("\n".join(messages))
 
@@ -975,6 +987,62 @@ class PlanningCommand(BaseCommand):
             else:
                 await self.send_text(f"❌ 删除失败")
 
+        elif subcommand == "clear":
+            # 清理旧日程
+            goal_manager = get_goal_manager()
+
+            # 获取要清理的天数（默认清理昨天及更早的日程）
+            days_to_keep = 0  # 只保留今天的
+            if len(parts) >= 3 and parts[2].isdigit():
+                days_to_keep = int(parts[2])
+
+            # 计算截止日期
+            from datetime import timedelta
+            cutoff_date = datetime.now() - timedelta(days=days_to_keep)
+            cutoff_str = cutoff_date.strftime("%Y-%m-%d")
+            today_str = datetime.now().strftime("%Y-%m-%d")
+
+            # 找出要清理的日程目标
+            goals = goal_manager.get_all_goals()
+            to_delete = []
+
+            for g in goals:
+                # 检查是否是日程类型
+                has_time_window = False
+                if g.parameters and "time_window" in g.parameters:
+                    has_time_window = True
+                elif g.conditions and "time_window" in g.conditions:
+                    has_time_window = True
+
+                if has_time_window:
+                    goal_date = None
+                    if g.created_at:
+                        try:
+                            if isinstance(g.created_at, str):
+                                goal_date = g.created_at.split("T")[0]
+                            else:
+                                goal_date = g.created_at.strftime("%Y-%m-%d")
+                        except Exception as e:
+                            logger.warning(f"解析目标创建时间失败: {g.created_at} - {e}")
+
+                    # 只删除旧日程（不包括今天）
+                    if goal_date and goal_date < cutoff_str:
+                        to_delete.append(g)
+
+            if not to_delete:
+                await self.send_text(f"✨ 没有需要清理的旧日程")
+            else:
+                # 执行删除
+                deleted_count = 0
+                for goal in to_delete:
+                    if goal_manager.delete_goal(goal.goal_id):
+                        deleted_count += 1
+
+                if deleted_count > 0:
+                    await self.send_text(f"🧹 已清理 {deleted_count} 个旧日程目标\n\n保留了今天的 {len(self._get_today_schedule_goals(goal_manager))} 个日程")
+                else:
+                    await self.send_text(f"❌ 清理失败")
+
         elif subcommand == "help":
             await self._show_help()
 
@@ -987,26 +1055,34 @@ class PlanningCommand(BaseCommand):
         """显示帮助"""
         help_text = """🤖 麦麦自主规划系统
 
-命令列表:
-/plan status - 查看日程概览（简洁格式）
-/plan list - 查看日程详情（包含完整描述）
-/plan delete <goal_id或序号> - 删除目标
+📋 命令列表:
+/plan status - 查看今日日程概览（简洁时间线）
+/plan list - 查看今日日程详情（图片格式）
+/plan delete <goal_id或序号> - 删除指定目标
+/plan clear - 清理昨天及更早的旧日程
 /plan help - 显示此帮助
 
 💡 使用方式:
-1. 对我说 "帮我创建一个目标..." 我会调用工具创建
-2. 我会自动执行已创建的目标
-3. 使用 status 查看简洁日程，list 查看详细信息
-4. 使用 delete 命令删除不需要的目标
+1. 对我说 "帮我生成今天的日程" 我会自动创建
+2. 对我说 "今天有什么安排" 我会查看并告诉你
+3. 使用 status 查看简洁格式，list 查看详细信息
+4. 使用 clear 清理旧日程，保持目标列表整洁
 
-示例:
-"帮我每小时检查一下系统状况"
+✨ 示例对话:
+"帮我生成今天的日程"
+"今天有什么安排"
+"现在应该做什么"
 "提醒我每天早上9点问候大家"
-"每天帮我学习一个新知识"
 
-删除示例:
-/plan delete 1        # 删除第1个目标
-/plan delete abc-123  # 删除指定ID的目标
+🗑️ 清理示例:
+/plan clear          # 清理昨天及更早的日程
+/plan delete 1       # 删除第1个目标
+/plan delete abc-123 # 删除指定ID的目标
+
+📌 注意:
+- 日程每天自动生成，无需手动创建
+- status/list 命令只显示今天的日程
+- clear 命令会自动保留今天的日程
 """
         await self.send_text(help_text)
 
