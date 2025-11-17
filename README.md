@@ -5,6 +5,7 @@
 ## 核心功能
 
 - **智能日程生成** - 基于 Bot 人设通过 LLM 自动生成每日、每周、每月计划
+- **定时自动生成** - 每天指定时间自动生成新日程，无需手动操作
 - **自然对话融入** - 在对话中自然提到当前在做什么（如"这会儿正在吃午饭"）
 - **多种展示格式** - 支持详细文字和精美图片两种日程查看方式
 - **自动维护** - 定期清理过期日程，保持数据整洁
@@ -69,6 +70,11 @@ auto_generate = true             # 首次询问时自动生成日程
 use_multi_round = true           # 启用多轮优化生成
 max_rounds = 2                   # 最多尝试轮数
 quality_threshold = 0.85         # 质量分数阈值
+
+# 定时自动生成配置
+auto_schedule_enabled = true     # 是否启用定时自动生成日程
+auto_schedule_time = "00:30"     # 每天自动生成日程的时间（HH:MM格式）
+timezone = "Asia/Shanghai"       # 时区设置
 ```
 
 **日程注入效果：**
@@ -90,8 +96,17 @@ quality_threshold = 0.85         # 质量分数阈值
 ### 日程生成流程
 
 ```
-用户请求 → 检查是否已有日程 → LLM 基于人设生成 → 批量保存为目标 → 注入到对话
+方式1: 用户请求 → 检查是否已有日程 → LLM 基于人设生成 → 批量保存为目标 → 注入到对话
+方式2: 定时触发 → 每天00:30自动执行 → LLM 基于人设生成 → 批量保存为目标 → 静默运行
 ```
+
+### 定时自动生成
+
+- **默认时间**：每天凌晨 00:30（可配置）
+- **智能跳过**：如果当天已有日程，则自动跳过
+- **静默运行**：完全后台执行，不打扰用户
+- **时区支持**：支持配置时区（默认 Asia/Shanghai）
+- **启动延迟**：插件启动10秒后自动开始定时任务
 
 ### LLM 生成机制
 
@@ -116,7 +131,8 @@ autonomous_planning_plugin/
 ├── config.toml                      # 配置文件
 ├── planner/                         # 核心规划模块
 │   ├── goal_manager.py              # 目标管理器（创建、更新、删除目标）
-│   └── schedule_generator.py        # 日程生成器（LLM生成、验证、应用）
+│   ├── schedule_generator.py        # 日程生成器（LLM生成、验证、应用）
+│   └── auto_scheduler.py            # 自动调度器（定时生成日程）
 ├── utils/                           # 工具模块
 │   ├── schedule_image_generator.py  # 日程图片生成器
 │   └── time_utils.py                # 时间窗口解析工具
@@ -136,6 +152,15 @@ A: 运行 `/plan status` 检查是否已生成，或尝试手动生成
 
 **Q: 如何禁用日程注入？**
 A: 在 `config.toml` 中设置 `inject_schedule = false`
+
+**Q: 如何修改定时生成的时间？**
+A: 在 `config.toml` 中修改 `auto_schedule_time` 配置项，格式为 "HH:MM"
+
+**Q: 如何禁用定时自动生成？**
+A: 在 `config.toml` 中设置 `auto_schedule_enabled = false`
+
+**Q: 定时生成会重复创建日程吗？**
+A: 不会，调度器会先检查当天是否已有日程，如果有则自动跳过
 
 **Q: 支持哪些活动类型？**
 A: daily_routine（作息）、meal（吃饭）、study（学习）、entertainment（娱乐）、social_maintenance（社交）、exercise（运动）、learn_topic（兴趣学习）、rest（休息）、free_time（自由时间）、custom（自定义）

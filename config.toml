@@ -14,3 +14,8 @@ inject_schedule = true  # 在对话时自然提到当前活动（推荐开启）
 use_multi_round = true  # 启用多轮生成机制，提升质量
 max_rounds = 2  # 最多尝试轮数（1-3）
 quality_threshold = 0.85  # 质量阈值（0.80-0.90，0.85推荐）
+
+# 定时自动生成配置
+auto_schedule_enabled = true  # 是否启用定时自动生成日程
+auto_schedule_time = "00:30"  # 每天自动生成日程的时间（HH:MM格式）
+timezone = "Asia/Shanghai"  # 时区设置
