@@ -164,11 +164,13 @@ class ScheduleAutoScheduler:
             today = datetime.datetime.now().strftime("%Y-%m-%d")
             self.logger.info(f"🔄 开始自动生成今日日程: {today}")
 
-            # 检查今天是否已有日程
+            # 检查今天是否已有日程（修复：支持datetime对象）
             goal_manager = self.get_goal_manager()
             goals = goal_manager.get_all_goals(chat_id="global")
 
             today_has_schedule = False
+            today_schedule_count = 0
+
             for goal in goals:
                 # 检查目标是否有time_window（日程类型）
                 time_window = None
@@ -180,12 +182,20 @@ class ScheduleAutoScheduler:
                 # 如果有time_window且创建时间是今天，说明已有日程
                 if time_window:
                     created_at = goal.created_at
-                    if isinstance(created_at, str) and created_at.startswith(today):
+                    goal_date = None
+
+                    # 支持字符串和datetime对象
+                    if isinstance(created_at, str):
+                        goal_date = created_at.split('T')[0] if 'T' in created_at else created_at[:10]
+                    elif created_at:
+                        goal_date = created_at.strftime('%Y-%m-%d')
+
+                    if goal_date == today:
                         today_has_schedule = True
-                        break
+                        today_schedule_count += 1
 
             if today_has_schedule:
-                self.logger.info(f"📅 今日已有日程，跳过自动生成")
+                self.logger.info(f"📅 今日已有 {today_schedule_count} 个日程，跳过自动生成")
                 return
 
             # 生成日程

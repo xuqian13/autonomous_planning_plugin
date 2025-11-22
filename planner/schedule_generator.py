@@ -612,8 +612,13 @@ class ScheduleGenerator:
                         # 其中 start_minutes 是从00:00开始的分钟数
                         start_minutes = hour * 60 + minute
 
-                        # 默认活动持续1小时
-                        end_minutes = start_minutes + 60
+                        # 🔧 修复：使用 interval_hours 计算结束时间
+                        if item.interval_hours:
+                            duration_minutes = int(item.interval_hours * 60)
+                            end_minutes = start_minutes + duration_minutes
+                        else:
+                            # 默认活动持续1小时（仅在没有interval_hours时）
+                            end_minutes = start_minutes + 60
 
                         # 避免跨午夜（超过24小时）
                         if end_minutes > 24 * 60:
@@ -877,16 +882,13 @@ class ScheduleGenerator:
 
     def _remove_time_conflicts(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        去除时间重叠的日程项（修复版：只检测相同time_slot）
+        去除时间重叠的日程项（增强版：检测真正的时间重叠）
 
         策略：
         1. 按 time_slot 排序
-        2. 如果两个活动的 time_slot 完全相同，只保留第一个
-        3. 记录并报告去重情况
-
-        注意：
-        - interval_hours 表示"执行间隔"（多久重复一次），不是"活动持续时间"
-        - 我们不应该用它来计算冲突，而应该简单检测time_slot是否重复
+        2. 计算每个活动的结束时间（使用interval_hours）
+        3. 检测时间重叠：如果活动A的结束时间 > 活动B的开始时间，则重叠
+        4. 优先保留优先级高、描述详细的活动
 
         Args:
             items: 已验证的日程项列表
@@ -897,56 +899,144 @@ class ScheduleGenerator:
         if not items:
             return items
 
-        # 解析时间并排序
+        # 解析时间并计算结束时间
         items_with_time = []
         for item in items:
             time_slot = item.get("time_slot")
             if not time_slot:
                 # 没有时间的项放在最后
-                items_with_time.append((9999, item))
+                items_with_time.append({
+                    'start': 9999,
+                    'end': 9999,
+                    'item': item
+                })
                 continue
 
             try:
-                # 解析时间为分钟数
+                # 解析开始时间为分钟数
                 parts = time_slot.split(":")
                 hour = int(parts[0])
                 minute = int(parts[1]) if len(parts) > 1 else 0
                 start_minutes = hour * 60 + minute
 
-                items_with_time.append((start_minutes, item))
-            except (ValueError, IndexError):
-                logger.warning(f"解析时间失败: {time_slot}，将忽略该项")
+                # 🔧 使用 interval_hours 计算结束时间
+                interval_hours = item.get("interval_hours", 1.0)
+                duration_minutes = int(interval_hours * 60)
+                end_minutes = start_minutes + duration_minutes
+
+                # 避免超过24小时
+                if end_minutes > 24 * 60:
+                    end_minutes = 24 * 60
+
+                items_with_time.append({
+                    'start': start_minutes,
+                    'end': end_minutes,
+                    'item': item
+                })
+            except (ValueError, IndexError) as e:
+                logger.warning(f"解析时间失败: {time_slot} - {e}，将忽略该项")
                 continue
 
         # 按开始时间排序
-        items_with_time.sort(key=lambda x: x[0])
+        items_with_time.sort(key=lambda x: x['start'])
 
-        # 去重：只检测time_slot是否完全相同
+        # 去重和冲突检测
         deduped_items = []
-        last_time_slot = None
         duplicates_removed = 0
+        overlaps_removed = 0
 
-        for start_time, item in items_with_time:
-            current_time_slot = item.get("time_slot")
+        for i, current in enumerate(items_with_time):
+            # 检查是否与已保留的活动重叠
+            has_conflict = False
 
-            # 检查time_slot是否与上一个完全相同
-            if current_time_slot == last_time_slot:
-                # time_slot重复，跳过
-                logger.warning(
-                    f"跳过时间重复的项: {item['name']} @ {current_time_slot}"
-                )
-                duplicates_removed += 1
-                continue
+            for kept in deduped_items:
+                # 检测时间重叠：
+                # 重叠条件：kept的结束时间 > current的开始时间 AND kept的开始时间 < current的结束时间
+                if kept['end'] > current['start'] and kept['start'] < current['end']:
+                    # 发现重叠
+                    overlap_minutes = min(kept['end'], current['end']) - max(kept['start'], current['start'])
 
-            deduped_items.append(item)
-            last_time_slot = current_time_slot
+                    # 决定保留哪个
+                    # 优先级：1. priority高的 2. 描述长的 3. 先出现的
+                    current_priority_score = self._calculate_priority_score(current['item'])
+                    kept_priority_score = self._calculate_priority_score(kept['item'])
 
-        if duplicates_removed > 0:
-            logger.warning(f"⚠️  去除了 {duplicates_removed} 个时间重复的日程项")
+                    if current_priority_score > kept_priority_score:
+                        # 当前活动优先级更高，移除已保留的
+                        logger.warning(
+                            f"时间重叠：{current['item']['name']} "
+                            f"({self._format_time(current['start'])}-{self._format_time(current['end'])}) "
+                            f"与 {kept['item']['name']} "
+                            f"({self._format_time(kept['start'])}-{self._format_time(kept['end'])}) "
+                            f"重叠 {overlap_minutes} 分钟，保留优先级更高的 {current['item']['name']}"
+                        )
+                        deduped_items.remove(kept)
+                        overlaps_removed += 1
+                    else:
+                        # 保留已有的活动，跳过当前
+                        logger.warning(
+                            f"时间重叠：{current['item']['name']} "
+                            f"({self._format_time(current['start'])}-{self._format_time(current['end'])}) "
+                            f"与 {kept['item']['name']} "
+                            f"({self._format_time(kept['start'])}-{self._format_time(kept['end'])}) "
+                            f"重叠 {overlap_minutes} 分钟，跳过 {current['item']['name']}"
+                        )
+                        has_conflict = True
+                        overlaps_removed += 1
+                        break
 
-        logger.info(f"✅ 日程验证完成：原始 {len(items)} 项 → 去重后 {len(deduped_items)} 项")
+            # 如果没有冲突，添加到结果
+            if not has_conflict:
+                deduped_items.append(current)
 
-        return deduped_items
+        if duplicates_removed > 0 or overlaps_removed > 0:
+            logger.warning(f"⚠️  去除了 {overlaps_removed} 个时间重叠的日程项")
+
+        # 提取item对象
+        result = [item['item'] for item in deduped_items]
+        logger.info(f"✅ 日程验证完成：原始 {len(items)} 项 → 去重后 {len(result)} 项")
+
+        return result
+
+    def _calculate_priority_score(self, item: Dict[str, Any]) -> float:
+        """
+        计算活动的优先级分数，用于冲突解决
+
+        评分标准：
+        - priority=high: +3
+        - priority=medium: +2
+        - priority=low: +1
+        - 描述长度 > 50字: +1
+        - 描述长度 > 80字: +2
+
+        Returns:
+            优先级分数（越高越优先）
+        """
+        score = 0.0
+
+        # 优先级分数
+        priority = item.get("priority", "medium")
+        if priority == "high":
+            score += 3
+        elif priority == "medium":
+            score += 2
+        else:  # low
+            score += 1
+
+        # 描述详细度分数
+        desc_len = len(item.get("description", ""))
+        if desc_len > 80:
+            score += 2
+        elif desc_len > 50:
+            score += 1
+
+        return score
+
+    def _format_time(self, minutes: int) -> str:
+        """将分钟数格式化为HH:MM"""
+        hours = minutes // 60
+        mins = minutes % 60
+        return f"{hours:02d}:{mins:02d}"
 
     def _calculate_quality_score(self, items: List[Dict], warnings: List[str]) -> float:
         """
@@ -1370,14 +1460,21 @@ class ScheduleGenerator:
 【活动类型】
 daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_maintenance(社交)|exercise(运动)|learn_topic(兴趣)|custom(其他)
 
-【JSON格式】
+【JSON格式示例】
 {{
   "schedule_items": [
-    {{"name":"睡觉","description":"躺床上翻来覆去想了一堆事，后来做了个奇怪的梦","goal_type":"daily_routine","priority":"high","time_slot":"00:00","interval_hours":24}},
-    {{"name":"起床","description":"闹钟响了好几次才爬起来，整个人迷迷糊糊的","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","interval_hours":24}},
+    {{"name":"睡觉","description":"躺床上翻来覆去想了一堆事，后来做了个奇怪的梦","goal_type":"daily_routine","priority":"high","time_slot":"00:00","interval_hours":7.5}},
+    {{"name":"起床","description":"闹钟响了好几次才爬起来，整个人迷迷糊糊的","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","interval_hours":0.25}},
+    {{"name":"早餐","description":"泡了杯燕麦粥慢慢喝","goal_type":"meal","priority":"medium","time_slot":"08:00","interval_hours":0.5}},
+    {{"name":"上午学习","description":"图书馆看书做作业","goal_type":"study","priority":"high","time_slot":"09:00","interval_hours":2}},
     ...（继续15-20个活动）
   ]
 }}
+
+⚠️ 重要：interval_hours 表示活动的持续时长（小时），不是重复间隔！
+- 睡觉 00:00 持续7.5小时 → 结束于 07:30
+- 起床 07:30 持续0.25小时（15分钟） → 结束于 07:45
+- 早餐 08:00 持续0.5小时（30分钟） → 结束于 08:30
 
 【要求】
 - 严格JSON格式，无注释

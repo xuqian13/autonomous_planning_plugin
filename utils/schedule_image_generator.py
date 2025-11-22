@@ -82,25 +82,30 @@ class ScheduleImageGenerator:
             return cls._cached_fonts[size]
 
         font_paths = [
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            # 优先使用支持数字和符号的字体
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",  # ✅ 支持中文+数字
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # ✅ 支持中文+数字
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
             "/System/Library/Fonts/PingFang.ttc",
             "C:/Windows/Fonts/msyh.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",  # ⚠️ 数字显示为方块，作为后备
         ]
 
         for path in font_paths:
             if os.path.exists(path):
                 try:
                     font = ImageFont.truetype(path, size)
-                    test_bbox = font.getbbox("测试")
+                    # 🔧 修复：同时测试中文、数字和符号（日程图片需要显示时间）
+                    test_text = "测试2025-11-18 09:30"
+                    test_bbox = font.getbbox(test_text)
                     if test_bbox[2] - test_bbox[0] > 0:
                         # 缓存字体
                         cls._cached_fonts[size] = font
+                        logger.info(f"已加载字体: {path} (size={size})")
                         return font
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"加载字体失败: {path} - {e}")
                     continue
 
         raise RuntimeError("未找到可用的中文字体")
