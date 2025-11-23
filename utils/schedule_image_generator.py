@@ -1,16 +1,48 @@
-"""
-日程图片生成器 - 将日程信息转换为美观的图片（冬季主题）
+"""Schedule Image Generator Module.
+
+This module generates beautiful schedule visualization images with a
+winter theme, including decorative elements and status indicators.
+
+Features:
+    - Winter-themed visual design with snowflakes and gradients
+    - Font caching for improved performance
+    - Image resource caching and reuse
+    - Concurrent generation limiting (max 3 simultaneous)
+    - Resolution limiting to prevent OOM
+    - Activity status indicators (current/completed/upcoming)
+    - Automatic highlighting of current/next activity
+
+Performance Optimizations:
+    - Cached font loading
+    - Pre-processed character images
+    - Semaphore-based concurrency control
+    - Memory-efficient image composition
+
+Example:
+    >>> from schedule_image_generator import ScheduleImageGenerator
+    >>>
+    >>> items = [
+    ...     {"time": "09:00-10:00", "name": "Morning exercise",
+    ...      "description": "Yoga and stretching", "goal_type": "exercise"},
+    ...     {"time": "10:00-11:00", "name": "Study time",
+    ...      "description": "Read a book", "goal_type": "study"}
+    ... ]
+    >>> path, base64_str = ScheduleImageGenerator.generate_schedule_image(
+    ...     title="Today's Schedule",
+    ...     schedule_items=items
+    ... )
 """
 
-import os
-import io
 import base64
-import random
+import io
 import math
+import os
+import random
 import threading
-from typing import Tuple, List, Dict, Any
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Tuple
+
 from PIL import Image, ImageDraw, ImageFont
 
 from src.common.logger import get_logger

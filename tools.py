@@ -1,0 +1,449 @@
+"""自主规划插件 - 工具模块"""
+
+import json
+from typing import Dict, Any
+from datetime import datetime, timedelta
+
+from src.plugin_system import BaseTool
+from src.llm_models.payload_content.tool_option import ToolParamType
+from src.common.logger import get_logger
+
+from .planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
+from .planner.schedule_generator import ScheduleGenerator, ScheduleType
+
+logger = get_logger("autonomous_planning.tools")
+
+class ManageGoalTool(BaseTool):
+    """目标管理工具 - 创建、查看、更新和删除目标"""
+
+    name = "manage_goal"
+    description = "管理麦麦的长期目标，支持创建、查看、更新、暂停、恢复、完成、取消、删除目标"
+    parameters = [
+        ("action", ToolParamType.STRING, "操作类型: create(创建)/list(列出)/get(查看)/update(更新)/pause(暂停)/resume(恢复)/complete(完成)/cancel(取消)/delete(删除)", True, None),
+        ("goal_id", ToolParamType.STRING, "目标ID (除create和list外都需要)", False, None),
+        ("name", ToolParamType.STRING, "目标名称 (create时必需)", False, None),
+        ("description", ToolParamType.STRING, "目标描述 (create时必需)", False, None),
+        ("goal_type", ToolParamType.STRING, "目标类型: health_check(系统检查/监控/健康检查), social_maintenance(问候/社交), learn_topic(学习/研究主题), custom(其他自定义目标). 根据目标名称和描述智能选择合适的类型", False, None),
+        ("priority", ToolParamType.STRING, "优先级: high/medium/low", False, None),
+        ("interval_minutes", ToolParamType.FLOAT, "执行间隔（分钟）。例如：2表示每2分钟执行一次，60表示每小时执行一次", False, None),
+        ("deadline_hours", ToolParamType.FLOAT, "截止时间（从现在开始的小时数）", False, None),
+        ("parameters", ToolParamType.STRING, "目标参数（JSON字符串）。health_check类型建议: {\"check_plugins\": true}; social_maintenance类型建议: {\"greeting_type\": \"morning\"}; learn_topic类型必需: {\"topics\": [\"主题1\", \"主题2\"], \"depth\": \"intermediate\"}", False, None),
+    ]
+    available_for_llm = True
+
+    async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
+        """执行目标管理操作"""
+        try:
+            action = function_args.get("action")
+            goal_manager = get_goal_manager()
+            chat_id = function_args.get("_chat_id", "default")
+            user_id = function_args.get("_user_id", "system")
+
+            if action == "create":
+                name = function_args.get("name")
+                description = function_args.get("description")
+
+                if not name or not description:
+                    return {"type": "error", "content": "创建目标需要提供name和description"}
+
+                # P0修复：输入验证 - 长度限制
+                if len(name) > 100:
+                    return {"type": "error", "content": "目标名称过长（最多100字符）"}
+                if len(description) > 500:
+                    return {"type": "error", "content": "目标描述过长（最多500字符）"}
+
+                # P0修复：输入验证 - 特殊字符过滤（防注入）
+                dangerous_patterns = ["<script>", "{{", "}}", "${", "$(", "`"]
+                for pattern in dangerous_patterns:
+                    if pattern in name or pattern in description:
+                        return {"type": "error", "content": f"输入包含非法字符: {pattern}"}
+
+                goal_type = function_args.get("goal_type", "custom")
+                priority = function_args.get("priority", "medium")
+                interval_minutes = function_args.get("interval_minutes")
+                deadline_hours = function_args.get("deadline_hours")
+
+                # 参数验证
+                if interval_minutes is not None:
+                    if interval_minutes <= 0:
+                        return {"type": "error", "content": "间隔时间必须大于0分钟"}
+                    if interval_minutes > 525600:  # 1年
+                        return {"type": "error", "content": "间隔时间不能超过1年"}
+
+                if deadline_hours is not None:
+                    if deadline_hours <= 0:
+                        return {"type": "error", "content": "截止时间必须大于0小时"}
+                    if deadline_hours > 87600:  # 10年
+                        return {"type": "error", "content": "截止时间不能超过10年"}
+
+                # 解析parameters参数
+                parameters_raw = function_args.get("parameters", {})
+                if isinstance(parameters_raw, str):
+                    try:
+                        parameters = json.loads(parameters_raw)
+                    except json.JSONDecodeError:
+                        logger.warning(f"无法解析参数 JSON: {parameters_raw}")
+                        parameters = {}
+                elif isinstance(parameters_raw, dict):
+                    parameters = parameters_raw
+                else:
+                    parameters = {}
+
+                # 计算时间
+                interval_seconds = int(interval_minutes * 60) if interval_minutes else None
+                deadline = datetime.now() + timedelta(hours=deadline_hours) if deadline_hours else None
+
+                goal = goal_manager.create_goal(
+                    name=name,
+                    description=description,
+                    goal_type=goal_type,
+                    creator_id=user_id,
+                    chat_id=chat_id,
+                    priority=priority,
+                    deadline=deadline,
+                    interval_seconds=interval_seconds,
+                    parameters=parameters,
+                )
+
+                content = f"""✅ 目标创建成功！
+
+{goal.get_summary()}
+
+麦麦会自动执行这个目标~"""
+
+                return {"type": "goal_created", "id": goal.goal_id, "content": content}
+
+            elif action == "list":
+                summary = goal_manager.get_goals_summary(chat_id=chat_id)
+                return {"type": "goal_list", "content": summary}
+
+            elif action == "get":
+                goal_id = function_args.get("goal_id")
+                if not goal_id:
+                    return {"type": "error", "content": "需要提供goal_id"}
+
+                goal = goal_manager.get_goal(goal_id)
+                if not goal:
+                    return {"type": "error", "content": f"目标不存在: {goal_id}"}
+
+                return {"type": "goal_info", "content": goal.get_summary()}
+
+            elif action == "update":
+                goal_id = function_args.get("goal_id")
+                if not goal_id:
+                    return {"type": "error", "content": "需要提供goal_id"}
+
+                update_params = {}
+                if "name" in function_args:
+                    update_params["name"] = function_args["name"]
+                if "description" in function_args:
+                    update_params["description"] = function_args["description"]
+                if "priority" in function_args:
+                    update_params["priority"] = GoalPriority(function_args["priority"])
+                if "interval_minutes" in function_args:
+                    update_params["interval_seconds"] = int(function_args["interval_minutes"] * 60)
+                if "parameters" in function_args:
+                    # 处理 parameters：可能是字符串（JSON）或字典
+                    parameters_raw = function_args["parameters"]
+                    if isinstance(parameters_raw, str):
+                        try:
+                            update_params["parameters"] = json.loads(parameters_raw)
+                        except json.JSONDecodeError:
+                            logger.warning(f"无法解析参数 JSON: {parameters_raw}")
+                            update_params["parameters"] = {}
+                    else:
+                        update_params["parameters"] = parameters_raw
+
+                success = goal_manager.update_goal(goal_id, **update_params)
+
+                if success:
+                    goal = goal_manager.get_goal(goal_id)
+                    if goal:
+                        return {"type": "goal_updated", "content": f"✅ 目标已更新\n\n{goal.get_summary()}"}
+                    else:
+                        return {"type": "error", "content": "目标已被删除"}
+                else:
+                    return {"type": "error", "content": "更新失败"}
+
+            elif action == "pause":
+                goal_id = function_args.get("goal_id")
+                if not goal_id:
+                    return {"type": "error", "content": "需要提供goal_id"}
+                success = goal_manager.pause_goal(goal_id)
+                return {
+                    "type": "goal_paused" if success else "error",
+                    "content": "⏸️ 目标已暂停" if success else "暂停失败"
+                }
+
+            elif action == "resume":
+                goal_id = function_args.get("goal_id")
+                if not goal_id:
+                    return {"type": "error", "content": "需要提供goal_id"}
+                success = goal_manager.resume_goal(goal_id)
+                return {
+                    "type": "goal_resumed" if success else "error",
+                    "content": "▶️ 目标已恢复" if success else "恢复失败"
+                }
+
+            elif action == "complete":
+                goal_id = function_args.get("goal_id")
+                if not goal_id:
+                    return {"type": "error", "content": "需要提供goal_id"}
+                success = goal_manager.complete_goal(goal_id)
+                return {
+                    "type": "goal_completed" if success else "error",
+                    "content": "✅ 目标已完成！" if success else "完成失败"
+                }
+
+            elif action == "cancel":
+                goal_id = function_args.get("goal_id")
+                if not goal_id:
+                    return {"type": "error", "content": "需要提供goal_id"}
+                success = goal_manager.cancel_goal(goal_id)
+                return {
+                    "type": "goal_cancelled" if success else "error",
+                    "content": "❌ 目标已取消" if success else "取消失败"
+                }
+
+            elif action == "delete":
+                goal_id = function_args.get("goal_id")
+                if not goal_id:
+                    return {"type": "error", "content": "需要提供goal_id"}
+                goal = goal_manager.get_goal(goal_id)
+                if not goal:
+                    return {"type": "error", "content": f"目标不存在: {goal_id}"}
+                goal_name = goal.name
+                success = goal_manager.delete_goal(goal_id)
+                return {
+                    "type": "goal_deleted" if success else "error",
+                    "content": f"🗑️ 已删除目标: {goal_name}" if success else "删除失败"
+                }
+
+            else:
+                return {"type": "error", "content": f"未知操作: {action}"}
+
+        except Exception as e:
+            logger.error(f"目标管理失败: {e}", exc_info=True)
+            return {"type": "error", "content": f"操作失败: {str(e)}"}
+
+
+class GetPlanningStatusTool(BaseTool):
+    """获取规划状态工具 - 查看活跃目标和执行历史"""
+
+    name = "get_planning_status"
+    description = "查看麦麦的自主规划系统状态，包括活跃目标、执行历史等"
+    parameters = [
+        ("detailed", ToolParamType.BOOLEAN, "是否显示详细信息", False, None),
+    ]
+    available_for_llm = True
+
+    async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
+        """查询并返回规划系统状态"""
+        try:
+            goal_manager = get_goal_manager()
+
+            # 获取统计信息
+            all_goals = goal_manager.get_all_goals()
+            active_goals = goal_manager.get_active_goals()
+
+            status_counts = {}
+            for goal in all_goals:
+                status = goal.status.value
+                status_counts[status] = status_counts.get(status, 0) + 1
+
+            # 构建状态报告
+            content = f"""🤖 麦麦自主规划系统状态
+
+📊 目标统计:
+   总目标数: {len(all_goals)}
+   活跃: {status_counts.get('active', 0)}
+   暂停: {status_counts.get('paused', 0)}
+   完成: {status_counts.get('completed', 0)}
+   取消: {status_counts.get('cancelled', 0)}
+
+🎯 当前活跃目标:"""
+
+            if active_goals:
+                for goal in active_goals[:5]:  # 只显示前5个
+                    content += f"\n\n{goal.get_summary()}"
+            else:
+                content += "\n   暂无活跃目标"
+
+            content += "\n\n💡 提示: 使用 manage_goal 工具可以创建新目标"
+
+            return {"type": "planning_status", "content": content}
+
+        except Exception as e:
+            logger.error(f"获取规划状态失败: {e}", exc_info=True)
+            return {"type": "error", "content": f"获取状态失败: {str(e)}"}
+
+
+class GenerateScheduleTool(BaseTool):
+    """生成日程工具 - 自动生成每日/每周/每月计划"""
+
+    name = "generate_schedule"
+    description = "自动生成并应用全局每日/每周/每月计划（所有聊天共享），使用LLM根据bot人设智能生成个性化计划，并自动保存为可执行目标"
+    parameters = [
+        ("schedule_type", ToolParamType.STRING, "日程类型: daily(每日)/weekly(每周)/monthly(每月)", True, None),
+        ("auto_apply", ToolParamType.BOOLEAN, "是否立即应用日程（默认true）", False, None),
+    ]
+    available_for_llm = True
+
+    async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
+        """生成并应用日程"""
+        try:
+            schedule_type_str = function_args.get("schedule_type", "daily")
+            auto_apply = function_args.get("auto_apply", True)
+            chat_id = "global"  # 全局日程
+            user_id = function_args.get("_user_id", "system")
+
+            goal_manager = get_goal_manager()
+
+            # 读取配置并传给ScheduleGenerator
+            schedule_config = {
+                "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", True),
+                "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 2),
+                "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
+                "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 8),
+                "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
+                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+                "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
+                "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
+                "custom_model": {
+                    "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
+                    "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),
+                    "api_base": self.get_config("autonomous_planning.schedule.custom_model.api_base", ""),
+                    "api_key": self.get_config("autonomous_planning.schedule.custom_model.api_key", ""),
+                    "provider": self.get_config("autonomous_planning.schedule.custom_model.provider", "openai"),
+                    "temperature": self.get_config("autonomous_planning.schedule.custom_model.temperature", 0.7),
+                },
+            }
+            schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
+            schedule_type = ScheduleType(schedule_type_str)
+
+            if schedule_type == ScheduleType.DAILY:
+                schedule = await schedule_generator.generate_daily_schedule(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    use_llm=True
+                )
+            elif schedule_type == ScheduleType.WEEKLY:
+                schedule = await schedule_generator.generate_weekly_schedule(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    use_llm=True
+                )
+            elif schedule_type == ScheduleType.MONTHLY:
+                schedule = await schedule_generator.generate_monthly_schedule(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    use_llm=True
+                )
+            else:
+                return {"type": "error", "content": f"未知的日程类型: {schedule_type_str}"}
+
+            # 获取日程摘要
+            summary = schedule_generator.get_schedule_summary(schedule)
+
+            # 自动应用日程
+            if auto_apply:
+                created_ids = await schedule_generator.apply_schedule(
+                    schedule=schedule,
+                    user_id=user_id,
+                    chat_id=chat_id
+                )
+                summary += f"\n\n✅ 日程已应用为全局目标，创建了 {len(created_ids)} 个目标（所有聊天共享）"
+
+            return {"type": "schedule_generated", "content": summary}
+
+        except Exception as e:
+            logger.error(f"生成日程失败: {e}", exc_info=True)
+            return {"type": "error", "content": f"生成日程失败: {str(e)}"}
+
+
+class ApplyScheduleTool(BaseTool):
+    """应用日程工具 - 将日程项转换为可执行目标"""
+
+    name = "apply_schedule"
+    description = "应用之前生成的日程，将日程项转换为全局可执行的目标（所有聊天共享）"
+    parameters = [
+        ("schedule_data", ToolParamType.STRING, "日程数据（从generate_schedule获取，JSON字符串）", True, None),
+    ]
+    available_for_llm = True
+
+    async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
+        """应用日程并创建目标"""
+        try:
+            schedule_data = function_args.get("schedule_data")
+            if not schedule_data:
+                return {"type": "error", "content": "需要提供schedule_data"}
+
+            chat_id = "global"  # 全局日程
+            user_id = function_args.get("_user_id", "system")
+
+            goal_manager = get_goal_manager()
+
+            # 读取配置并传给ScheduleGenerator
+            schedule_config = {
+                "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", True),
+                "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 2),
+                "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
+                "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 8),
+                "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
+                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+                "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
+                "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
+                "custom_model": {
+                    "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
+                    "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),
+                    "api_base": self.get_config("autonomous_planning.schedule.custom_model.api_base", ""),
+                    "api_key": self.get_config("autonomous_planning.schedule.custom_model.api_key", ""),
+                    "provider": self.get_config("autonomous_planning.schedule.custom_model.provider", "openai"),
+                    "temperature": self.get_config("autonomous_planning.schedule.custom_model.temperature", 0.7),
+                },
+            }
+            schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
+
+            # 重建Schedule对象
+            from .planner.schedule_generator import ScheduleItem, Schedule
+            items = []
+            for item_data in schedule_data.get("items", []):
+                items.append(ScheduleItem(
+                    name=item_data["name"],
+                    description=item_data["description"],
+                    goal_type=item_data["goal_type"],
+                    priority=item_data["priority"],
+                    time_slot=item_data.get("time_slot"),
+                    interval_hours=item_data.get("interval_hours"),
+                    parameters=item_data.get("parameters", {}),
+                    conditions=item_data.get("conditions", {}),
+                ))
+
+            schedule = Schedule(
+                schedule_type=ScheduleType(schedule_data["schedule_type"]),
+                name=schedule_data["name"],
+                items=items
+            )
+
+            # 应用日程
+            created_ids = await schedule_generator.apply_schedule(
+                schedule=schedule,
+                user_id=user_id,
+                chat_id=chat_id
+            )
+
+            content = f"""✅ 日程应用成功！
+
+创建了 {len(created_ids)} 个全局目标（所有聊天共享）
+日程名称: {schedule.name}
+
+这些目标已经激活，麦麦会自动执行它们~
+
+使用 /plan status 查看所有目标"""
+
+            return {"type": "schedule_applied", "content": content}
+
+        except Exception as e:
+            logger.error(f"应用日程失败: {e}", exc_info=True)
+            return {"type": "error", "content": f"应用日程失败: {str(e)}"}
+

@@ -9,6 +9,33 @@
 - **自然对话融入** - 在对话中自然提到当前在做什么
 - **多种展示格式** - 支持文字和图片两种日程查看方式
 
+## 安装
+
+### 依赖要求
+
+确保安装了以下Python包：
+
+```bash
+pip install -r requirements.txt
+```
+
+主要依赖：
+- `structlog` - 结构化日志
+- `toml` - 配置文件解析
+- `Pillow` - 图片生成
+
+### 字体要求
+
+图片生成功能需要中文字体支持。插件会自动查找以下字体：
+- `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc` (推荐)
+- `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`
+- 其他系统字体
+
+在Ubuntu/Debian上安装字体：
+```bash
+sudo apt-get install fonts-wqy-microhei
+```
+
 ## 快速开始
 
 ### 自动生成日程

@@ -1,10 +1,22 @@
-"""
-时间窗口工具函数
+"""Time Window Utility Functions.
 
-提供时间窗口的解析和迁移功能，避免循环导入
+This module provides utilities for parsing and migrating time windows,
+avoiding circular imports and centralizing time-related logic.
+
+The module handles two time window formats:
+    - Old format: [hour, hour] where hour is 0-23
+    - New format: [minutes, minutes] where minutes is 0-1440
+
+Functions also support overnight time windows (e.g., 23:00-01:00).
+
+Example:
+    >>> from time_utils import parse_time_window, format_minutes_to_time
+    >>> start, end = parse_time_window([9, 17])  # 9am to 5pm
+    >>> print(f"{format_minutes_to_time(start)} - {format_minutes_to_time(end)}")
+    09:00 - 17:00
 """
 
-from typing import Optional, Tuple, List, Union, Any
+from typing import Any, List, Optional, Tuple, Union
 
 
 def migrate_time_window(time_window: Optional[List[Union[int, float]]]) -> Optional[List[int]]:

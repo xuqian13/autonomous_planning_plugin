@@ -1,20 +1,48 @@
-"""
-日程生成器
-自动生成每日/每周/每月计划
+"""Schedule Generator Module.
+
+This module provides intelligent schedule generation using LLM integration.
+It can generate daily, weekly, and monthly schedules with personalization.
+
+Classes:
+    ScheduleType: Enumeration of schedule types (daily/weekly/monthly)
+    ScheduleItem: Represents a single scheduled activity
+    Schedule: Represents a complete schedule with metadata
+    ScheduleSemanticValidator: Validates schedule reasonableness
+    ScheduleGenerator: Main schedule generation engine
+
+Features:
+    - LLM-powered personalized schedule generation
+    - Multi-round generation with quality scoring
+    - Semantic validation (meal times, activity duration, etc.)
+    - JSON Schema constraints for consistent output
+    - Time conflict detection and resolution
+    - Batch goal creation for performance
+
+Example:
+    >>> from schedule_generator import ScheduleGenerator, ScheduleType
+    >>> from goal_manager import get_goal_manager
+    >>>
+    >>> manager = get_goal_manager()
+    >>> generator = ScheduleGenerator(manager)
+    >>> schedule = await generator.generate_daily_schedule(
+    ...     user_id="user123",
+    ...     chat_id="chat456",
+    ...     use_llm=True
+    ... )
 """
 
+import asyncio
 import json
 import random
-import asyncio
-from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.common.logger import get_logger
-from src.plugin_system.apis import llm_api, config_api
+from src.plugin_system.apis import config_api, llm_api
 
+from ..utils.time_utils import format_minutes_to_time, time_slot_to_minutes
 from .goal_manager import GoalManager, GoalPriority
-from ..utils.time_utils import time_slot_to_minutes, format_minutes_to_time
 
 logger = get_logger("autonomous_planning.schedule_generator")
 
@@ -400,10 +428,10 @@ class ScheduleGenerator:
             JSON Schema字典
         """
         # 从配置读取参数
-        min_activities = self.config.get('min_activities', 6)
-        max_activities = self.config.get('max_activities', 12)
+        min_activities = self.config.get('min_activities', 8)
+        max_activities = self.config.get('max_activities', 15)
         min_desc_len = self.config.get('min_description_length', 15)
-        max_desc_len = self.config.get('max_description_length', 30)
+        max_desc_len = self.config.get('max_description_length', 50)
 
         return {
             "type": "object",
@@ -1153,10 +1181,10 @@ class ScheduleGenerator:
             return 0.0
 
         # 从配置读取参数
-        min_activities = self.config.get('min_activities', 6)
-        max_activities = self.config.get('max_activities', 12)
+        min_activities = self.config.get('min_activities', 8)
+        max_activities = self.config.get('max_activities', 15)
         min_desc_len = self.config.get('min_description_length', 15)
-        max_desc_len = self.config.get('max_description_length', 30)
+        max_desc_len = self.config.get('max_description_length', 50)
         target_desc_len = (min_desc_len + max_desc_len) // 2
 
         # 基础分
@@ -1530,10 +1558,10 @@ class ScheduleGenerator:
         bot_name = config_api.get_global_config("bot.nickname", "麦麦")
 
         # 从配置读取生成参数
-        min_activities = self.config.get('min_activities', 6)
-        max_activities = self.config.get('max_activities', 12)
+        min_activities = self.config.get('min_activities', 8)
+        max_activities = self.config.get('max_activities', 15)
         min_desc_len = self.config.get('min_description_length', 15)
-        max_desc_len = self.config.get('max_description_length', 30)
+        max_desc_len = self.config.get('max_description_length', 50)
 
         # 时间信息
         today = datetime.now()

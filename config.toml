@@ -1,5 +1,5 @@
 # 麦麦自主规划插件配置
-# 版本：v2.2.0
+# 版本：v3.0.0
 
 [plugin]
 enabled = true  # 是否启用插件
@@ -10,16 +10,22 @@ cleanup_old_goals_days = 30  # 保留历史记录天数
 
 # 日程生成配置
 [autonomous_planning.schedule]
+# 日程注入功能
 inject_schedule = true  # 在对话时自然提到当前活动（推荐开启）
-use_multi_round = false  # 启用多轮生成机制，提升质量（关闭可加速）
-max_rounds = 1  # 最多尝试轮数（1-3）
-quality_threshold = 0.80  # 质量阈值（0.80-0.90，降低可加速）
+auto_generate = true  # 询问日程时自动检查并生成（推荐开启）
 
-# P2优化：可配置的生成参数
+# 多轮生成配置
+use_multi_round = true  # 启用多轮生成机制，提升质量（关闭可加速）
+max_rounds = 2  # 最多尝试轮数（1-3）
+quality_threshold = 0.85  # 质量阈值（0.80-0.90，降低可加速）
+
+# 生成参数
 min_activities = 8  # 最少活动数量
 max_activities = 15  # 最多活动数量
 min_description_length = 15  # 描述最小长度
 max_description_length = 50  # 描述最大长度
+max_tokens = 8192  # 日程生成的最大token数
+generation_timeout = 180.0  # 日程生成超时时间（秒）
 
 # 缓存配置
 cache_ttl = 300  # 缓存TTL（秒），默认5分钟
@@ -29,3 +35,15 @@ cache_max_size = 100  # 缓存最大条目数
 auto_schedule_enabled = true  # 是否启用定时自动生成日程
 auto_schedule_time = "00:30"  # 每天自动生成日程的时间（HH:MM格式）
 timezone = "Asia/Shanghai"  # 时区设置
+
+# 权限配置
+admin_users = []  # 管理员QQ号列表，格式: ["12345", "67890"]，留空则所有人可用
+
+# 自定义模型配置（可选）
+[autonomous_planning.schedule.custom_model]
+enabled = false  # 是否启用自定义模型
+model_name = ""  # 模型名称，如: "gpt-4"
+api_base = ""  # API地址，如: "https://api.openai.com/v1"
+api_key = ""  # API密钥
+provider = ""  # 提供商类型，如: "openai"
+temperature = 0.7  # 温度参数（0.0-1.0）

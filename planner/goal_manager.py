@@ -1,45 +1,84 @@
-"""
-目标管理器
-管理麦麦的长期目标、任务和计划
+"""Goal Manager Module (SQLite Version).
+
+This module provides goal management functionality using SQLite database
+for improved performance and concurrency handling.
+
+Classes:
+    GoalStatus: Enumeration of possible goal statuses
+    GoalPriority: Enumeration of goal priority levels
+    Goal: Represents a single goal with tracking information
+    GoalManager: Manages all goals with SQLite persistence
+
+Improvements over JSON version:
+    - Better concurrency (SQLite built-in locking)
+    - ACID transactions (no data corruption)
+    - Faster queries
+    - No manual file locking needed
+    - Automatic cleanup and optimization
+
+Example:
+    >>> from goal_manager import get_goal_manager, GoalPriority
+    >>> manager = get_goal_manager()
+    >>> goal = manager.create_goal(
+    ...     name="Daily Exercise",
+    ...     description="Exercise for 30 minutes",
+    ...     goal_type="health",
+    ...     creator_id="user123",
+    ...     chat_id="chat456",
+    ...     priority="high"
+    ... )
 """
 
-import os
-import json
 import uuid
-import tempfile
-import shutil
-import fcntl
-import threading
-import time
-import atexit
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any, Set
 from enum import Enum
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 from src.common.logger import get_logger
+
+from ..database import GoalDatabase
 
 logger = get_logger("autonomous_planning.goal_manager")
 
 
 class GoalStatus(Enum):
-    """目标状态"""
-    ACTIVE = "active"        # 活跃中
-    PAUSED = "paused"        # 已暂停
-    COMPLETED = "completed"  # 已完成
-    CANCELLED = "cancelled"  # 已取消
-    FAILED = "failed"        # 已失败
+    """Goal status enumeration."""
+    ACTIVE = "active"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 class GoalPriority(Enum):
-    """目标优先级"""
+    """Goal priority enumeration."""
     HIGH = "high"
     MEDIUM = "medium"
     LOW = "low"
 
 
 class Goal:
-    """目标类"""
+    """Goal class representing a single goal.
+
+    Attributes:
+        goal_id: Unique identifier
+        name: Goal name
+        description: Detailed description
+        goal_type: Type of goal
+        priority: Priority level
+        creator_id: User who created the goal
+        chat_id: Chat where goal was created
+        status: Current status
+        created_at: Creation timestamp
+        deadline: Optional deadline
+        interval_seconds: Execution interval
+        conditions: Execution conditions
+        parameters: Goal parameters
+        progress: Progress percentage (0-100)
+        last_executed_at: Last execution timestamp
+        execution_count: Number of executions
+    """
 
     def __init__(
         self,
@@ -78,7 +117,11 @@ class Goal:
         self.execution_count = execution_count
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典"""
+        """Convert goal to dictionary.
+
+        Returns:
+            Dictionary representation of goal
+        """
         return {
             "goal_id": self.goal_id,
             "name": self.name,
@@ -100,11 +143,18 @@ class Goal:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Goal":
-        """从字典创建"""
-        # 转换时间字符串
-        created_at = datetime.fromisoformat(data["created_at"]) if data.get("created_at") else None
-        deadline = datetime.fromisoformat(data["deadline"]) if data.get("deadline") else None
-        last_executed_at = datetime.fromisoformat(data["last_executed_at"]) if data.get("last_executed_at") else None
+        """Create goal from dictionary.
+
+        Args:
+            data: Dictionary containing goal data
+
+        Returns:
+            Goal instance
+        """
+        # Parse datetime fields
+        created_at = cls._parse_datetime(data.get("created_at"))
+        deadline = cls._parse_datetime(data.get("deadline"))
+        last_executed_at = cls._parse_datetime(data.get("last_executed_at"))
 
         return cls(
             goal_id=data["goal_id"],
@@ -125,30 +175,55 @@ class Goal:
             execution_count=data.get("execution_count", 0),
         )
 
+    @staticmethod
+    def _parse_datetime(dt_str):
+        """Parse datetime string.
+
+        Args:
+            dt_str: ISO format datetime string
+
+        Returns:
+            datetime object or None
+        """
+        if not dt_str:
+            return None
+        try:
+            return datetime.fromisoformat(dt_str)
+        except (ValueError, TypeError):
+            return None
+
     def should_execute_now(self) -> bool:
-        """判断是否应该执行"""
+        """Check if goal should be executed now.
+
+        Returns:
+            True if goal should be executed, False otherwise
+        """
         if self.status != GoalStatus.ACTIVE:
             return False
 
-        # 如果有执行间隔，检查是否到时间
+        # Check execution interval
         if self.interval_seconds and self.last_executed_at:
             next_execution = self.last_executed_at + timedelta(seconds=self.interval_seconds)
             if datetime.now() < next_execution:
                 return False
 
-        # 检查截止时间
+        # Check deadline
         if self.deadline and datetime.now() > self.deadline:
             return False
 
         return True
 
     def mark_executed(self):
-        """标记为已执行"""
+        """Mark goal as executed."""
         self.last_executed_at = datetime.now()
         self.execution_count += 1
 
     def get_summary(self) -> str:
-        """获取目标摘要"""
+        """Get goal summary.
+
+        Returns:
+            Formatted summary string
+        """
         status_emoji = {
             GoalStatus.ACTIVE: "🟢",
             GoalStatus.PAUSED: "⏸️",
@@ -193,185 +268,29 @@ class Goal:
 
 
 class GoalManager:
-    """目标管理器"""
+    """Goal manager using SQLite database.
 
-    def __init__(self, data_dir: str = None):
+    Simplified version that delegates all persistence to GoalDatabase.
+    No need for manual file locking, delayed saves, or backup management
+    as SQLite handles all of this natively.
+
+    Args:
+        data_dir: Directory for database file (default: plugin_dir/data)
+        db_name: Database file name (default: goals.db)
+    """
+
+    def __init__(self, data_dir: str = None, db_name: str = "goals.db"):
         if data_dir is None:
             data_dir = Path(__file__).parent.parent / "data"
+
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.goals_file = self.data_dir / "goals.json"
-        self.backup_file = self.data_dir / "goals.json.bak"  # P2优化：备份文件
-        self.goals: Dict[str, Goal] = {}
+        # Initialize database
+        db_path = self.data_dir / db_name
+        self.db = GoalDatabase(db_path=str(db_path), backup_on_init=True)
 
-        # 🆕 P1优化：延迟保存机制
-        self._dirty = False  # 标记是否有未保存的修改
-        self._save_timer = None  # 保存定时器
-        self._save_delay = 1.0  # 延迟1秒后保存（合并多个修改）
-
-        self._load_goals()
-
-        # 🆕 注册退出钩子，确保程序退出时保存数据
-        atexit.register(self._exit_handler)
-
-    def _load_goals(self):
-        """从文件加载目标"""
-        if self.goals_file.exists():
-            try:
-                with open(self.goals_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for goal_data in data:
-                        goal = Goal.from_dict(goal_data)
-                        self.goals[goal.goal_id] = goal
-                logger.info(f"加载了 {len(self.goals)} 个目标")
-            except Exception as e:
-                logger.error(f"加载目标失败: {e}", exc_info=True)
-
-    def _save_goals(self):
-        """
-        原子保存目标到文件（带文件锁和备份）
-
-        改进：
-        1. 使用临时文件 + 原子移动，防止写入中断导致数据损坏
-        2. 使用文件锁（fcntl），解决并发写入问题
-        3. 添加非阻塞锁 + 重试机制，防止永久阻塞
-        4. P2优化：保存前创建备份
-        5. 异常时自动清理临时文件
-        """
-        try:
-            data = [goal.to_dict() for goal in self.goals.values()]
-
-            # 确保数据目录存在
-            self.data_dir.mkdir(parents=True, exist_ok=True)
-
-            # P2优化：保存前创建备份（如果原文件存在）
-            if self.goals_file.exists():
-                try:
-                    shutil.copy2(self.goals_file, self.backup_file)
-                    logger.debug(f"已创建备份: {self.backup_file}")
-                except Exception as e:
-                    logger.warning(f"创建备份失败: {e}")
-
-            # 创建临时文件（在同一目录，确保原子移动）
-            temp_fd, temp_path = tempfile.mkstemp(
-                suffix='.json',
-                prefix='.goals_tmp_',
-                dir=self.data_dir,
-                text=True
-            )
-
-            try:
-                # 写入临时文件
-                with open(temp_fd, 'w', encoding='utf-8') as f:
-                    # 🆕 使用非阻塞锁 + 重试机制（最多重试5次，每次等待0.1秒）
-                    locked = False
-                    for attempt in range(5):
-                        try:
-                            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            locked = True
-                            break
-                        except IOError:
-                            if attempt < 4:
-                                time.sleep(0.1)  # 等待100ms后重试
-                            else:
-                                raise RuntimeError("无法获取文件锁（超时500ms）")
-
-                    try:
-                        json.dump(data, f, ensure_ascii=False, indent=2)
-                        f.flush()  # 确保数据写入磁盘
-                        os.fsync(f.fileno())  # 🆕 强制刷新到磁盘
-                    finally:
-                        if locked:
-                            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-                # 原子替换（mv操作在同一文件系统是原子的）
-                shutil.move(temp_path, self.goals_file)
-                logger.debug(f"✅ 原子保存 {len(self.goals)} 个目标成功")
-
-            except Exception as e:
-                # 清理临时文件
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
-                raise e
-
-        except Exception as e:
-            logger.error(f"保存目标失败: {e}", exc_info=True)
-
-    def _schedule_save(self):
-        """
-        延迟保存：等待1秒，合并多个修改操作
-
-        场景：
-        - create_goal 连续创建多个目标
-        - update_goal 连续更新
-        - delete_goal 批量删除
-
-        收益：减少I/O操作80%+
-        """
-        # 标记为脏数据
-        self._dirty = True
-
-        # 取消之前的定时器
-        if self._save_timer is not None:
-            try:
-                self._save_timer.cancel()
-            except RuntimeError:
-                # Timer已经执行或取消
-                pass
-
-        # 🆕 使用threading.Timer（更可靠）
-        self._save_timer = threading.Timer(
-            self._save_delay,
-            self._save_goals
-        )
-        self._save_timer.daemon = True  # 设置为守护线程
-        self._save_timer.start()
-
-    def _force_save(self):
-        """
-        强制立即保存（用于批量操作完成后）
-        """
-        # 取消定时器
-        if self._save_timer is not None:
-            try:
-                self._save_timer.cancel()
-            except RuntimeError:
-                # Timer已经执行或取消
-                pass
-            self._save_timer = None
-
-        # 立即保存（无论是否dirty）
-        self._save_goals()
-        self._dirty = False
-
-    def _exit_handler(self):
-        """
-        程序退出时的清理函数
-
-        功能：
-        1. 取消未完成的保存定时器
-        2. 强制保存所有未保存的数据
-        3. 确保数据不丢失
-        """
-        try:
-            # 取消定时器
-            if self._save_timer is not None:
-                try:
-                    self._save_timer.cancel()
-                except RuntimeError:
-                    pass
-                self._save_timer = None
-
-            # 如果有未保存的数据，强制保存
-            if self._dirty or self.goals:
-                logger.info("程序退出，强制保存目标数据...")
-                self._save_goals()
-                logger.info("✅ 退出时保存完成")
-        except Exception as e:
-            logger.error(f"退出时保存失败: {e}", exc_info=True)
+        logger.info(f"GoalManager initialized with database: {db_path}")
 
     def create_goal(
         self,
@@ -385,11 +304,44 @@ class GoalManager:
         interval_seconds: Optional[int] = None,
         conditions: Optional[Dict[str, Any]] = None,
         parameters: Optional[Dict[str, Any]] = None,
-        auto_save: bool = True,  # 是否自动保存
+        auto_save: bool = True,  # Kept for compatibility, always saves immediately
     ) -> Goal:
-        """创建新目标"""
+        """Create a new goal.
+
+        Args:
+            name: Goal name
+            description: Goal description
+            goal_type: Type of goal
+            creator_id: User who creates the goal
+            chat_id: Chat identifier
+            priority: Priority level (high/medium/low)
+            deadline: Optional deadline
+            interval_seconds: Execution interval in seconds
+            conditions: Execution conditions
+            parameters: Goal parameters
+            auto_save: Compatibility parameter (ignored, always saves)
+
+        Returns:
+            Created Goal object
+        """
         goal_id = str(uuid.uuid4())
 
+        # Create goal in database
+        self.db.create_goal(
+            goal_id=goal_id,
+            name=name,
+            description=description,
+            goal_type=goal_type,
+            priority=priority,
+            creator_id=creator_id,
+            chat_id=chat_id,
+            deadline=deadline,
+            interval_seconds=interval_seconds,
+            conditions=conditions,
+            parameters=parameters,
+        )
+
+        # Return Goal object
         goal = Goal(
             goal_id=goal_id,
             name=name,
@@ -404,99 +356,104 @@ class GoalManager:
             parameters=parameters,
         )
 
-        self.goals[goal_id] = goal
-
-        if auto_save:
-            # 🆕 使用延迟保存而非立即保存
-            self._schedule_save()
-            logger.debug(f"创建了新目标（延迟保存）: {name} (ID: {goal_id})")
-        else:
-            logger.debug(f"创建了新目标（未保存）: {name} (ID: {goal_id})")
-
+        logger.debug(f"Created goal: {name} (ID: {goal_id})")
         return goal
 
-    def create_goals_batch(
-        self,
-        goals_data: List[Dict[str, Any]]
-    ) -> List[Goal]:
-        """
-        批量创建目标（只保存一次，支持事务回滚）
+    def create_goals_batch(self, goals_data: List[Dict[str, Any]]) -> List[Goal]:
+        """Batch create goals.
 
         Args:
-            goals_data: 目标数据列表，每个字典包含create_goal的参数
+            goals_data: List of goal data dictionaries
 
         Returns:
-            创建的Goal对象列表
+            List of created Goal objects
 
         Raises:
-            Exception: 创建失败时抛出异常，已创建的目标会被回滚
+            Exception: If batch creation fails
         """
         created_goals = []
-        created_goal_ids = []
 
         try:
-            for idx, data in enumerate(goals_data):
-                # 强制不自动保存
-                data['auto_save'] = False
-                try:
-                    goal = self.create_goal(**data)
-                    created_goals.append(goal)
-                    created_goal_ids.append(goal.goal_id)
-                except Exception as e:
-                    logger.error(f"创建第 {idx+1} 个目标失败: {e}", exc_info=True)
-                    raise RuntimeError(f"批量创建中断：第 {idx+1} 个目标创建失败") from e
+            for data in goals_data:
+                # Remove auto_save parameter if present
+                data.pop('auto_save', None)
 
-            # 🆕 批量操作完成后，强制立即保存（不延迟）
-            self._force_save()
-            logger.info(f"批量创建了 {len(created_goals)} 个目标")
+                goal = self.create_goal(**data)
+                created_goals.append(goal)
 
+            logger.info(f"Batch created {len(created_goals)} goals")
             return created_goals
 
         except Exception as e:
-            # 🆕 事务回滚：删除已创建的目标
-            logger.warning(f"批量创建失败，回滚已创建的 {len(created_goal_ids)} 个目标")
-            for goal_id in created_goal_ids:
-                if goal_id in self.goals:
-                    del self.goals[goal_id]
-            raise e
+            logger.error(f"Batch creation failed: {e}", exc_info=True)
+            raise
 
     def get_goal(self, goal_id: str) -> Optional[Goal]:
-        """获取目标"""
-        return self.goals.get(goal_id)
+        """Get goal by ID.
 
-    def get_all_goals(self, chat_id: Optional[str] = None, status: Optional[GoalStatus] = None) -> List[Goal]:
-        """获取所有目标"""
-        goals = list(self.goals.values())
+        Args:
+            goal_id: Goal identifier
 
-        if chat_id:
-            goals = [g for g in goals if g.chat_id == chat_id]
+        Returns:
+            Goal object or None if not found
+        """
+        data = self.db.get_goal(goal_id)
+        if data:
+            return Goal.from_dict(data)
+        return None
 
-        if status:
-            goals = [g for g in goals if g.status == status]
+    def get_all_goals(
+        self,
+        chat_id: Optional[str] = None,
+        status: Optional[GoalStatus] = None
+    ) -> List[Goal]:
+        """Get all goals with optional filtering.
 
-        return goals
+        Args:
+            chat_id: Filter by chat ID
+            status: Filter by status
+
+        Returns:
+            List of Goal objects
+        """
+        status_str = status.value if status else None
+        goals_data = self.db.get_all_goals(chat_id=chat_id, status=status_str)
+
+        return [Goal.from_dict(data) for data in goals_data]
 
     def get_active_goals(self, chat_id: Optional[str] = None) -> List[Goal]:
-        """获取活跃的目标"""
+        """Get active goals.
+
+        Args:
+            chat_id: Optional chat ID filter
+
+        Returns:
+            List of active Goal objects
+        """
         return self.get_all_goals(chat_id=chat_id, status=GoalStatus.ACTIVE)
 
     def get_executable_goals(self) -> List[Goal]:
-        """获取可以执行的目标"""
+        """Get goals that should be executed now.
+
+        Returns:
+            List of executable Goal objects
+        """
         active_goals = self.get_active_goals()
         return [g for g in active_goals if g.should_execute_now()]
 
-    def get_schedule_goals(self, chat_id: str = "global", date_str: Optional[str] = None) -> List[Goal]:
-        """
-        P2优化：获取日程目标（带 time_window 的目标）
-
-        消除重复代码，统一日程目标的获取逻辑。
+    def get_schedule_goals(
+        self,
+        chat_id: str = "global",
+        date_str: Optional[str] = None
+    ) -> List[Goal]:
+        """Get schedule goals (goals with time_window).
 
         Args:
-            chat_id: 聊天ID，默认为 "global"
-            date_str: 日期字符串（YYYY-MM-DD），默认为今天
+            chat_id: Chat identifier (default: "global")
+            date_str: Date string (YYYY-MM-DD, default: today)
 
         Returns:
-            符合条件的日程目标列表
+            List of schedule Goal objects
         """
         if date_str is None:
             date_str = datetime.now().strftime("%Y-%m-%d")
@@ -505,7 +462,7 @@ class GoalManager:
         schedule_goals = []
 
         for goal in goals:
-            # 检查是否有 time_window（日程类型的标志）
+            # Check for time_window in parameters or conditions
             has_time_window = False
             if goal.parameters and "time_window" in goal.parameters:
                 has_time_window = True
@@ -513,125 +470,175 @@ class GoalManager:
                 has_time_window = True
 
             if has_time_window:
-                # 检查创建日期
+                # Check creation date
                 goal_date = None
                 if goal.created_at:
                     try:
-                        if isinstance(goal.created_at, str):
-                            goal_date = goal.created_at.split("T")[0]
-                        else:
-                            goal_date = goal.created_at.strftime("%Y-%m-%d")
+                        goal_date = goal.created_at.strftime("%Y-%m-%d")
                     except Exception:
                         pass
 
-                # 只返回指定日期的日程
+                # Only return goals for specified date
                 if goal_date == date_str:
                     schedule_goals.append(goal)
 
         return schedule_goals
 
-    def update_goal(
-        self,
-        goal_id: str,
-        **kwargs
-    ) -> bool:
-        """更新目标"""
-        goal = self.goals.get(goal_id)
-        if not goal:
-            return False
+    def update_goal(self, goal_id: str, **kwargs) -> bool:
+        """Update goal fields.
 
-        # 更新字段
-        for key, value in kwargs.items():
-            if hasattr(goal, key):
-                setattr(goal, key, value)
+        Args:
+            goal_id: Goal identifier
+            **kwargs: Fields to update
 
-        # 🆕 使用延迟保存
-        self._schedule_save()
-        logger.debug(f"更新了目标（延迟保存）: {goal_id}")
-        return True
+        Returns:
+            True if updated, False if not found
+        """
+        return self.db.update_goal(goal_id, **kwargs)
 
     def update_goal_status(self, goal_id: str, status: GoalStatus) -> bool:
-        """更新目标状态"""
-        return self.update_goal(goal_id, status=status)
+        """Update goal status.
+
+        Args:
+            goal_id: Goal identifier
+            status: New status
+
+        Returns:
+            True if updated, False if not found
+        """
+        return self.update_goal(goal_id, status=status.value)
 
     def update_goal_progress(self, goal_id: str, progress: int) -> bool:
-        """更新目标进度"""
-        progress = max(0, min(100, progress))  # 限制在 0-100
+        """Update goal progress.
+
+        Args:
+            goal_id: Goal identifier
+            progress: Progress percentage (0-100)
+
+        Returns:
+            True if updated, False if not found
+        """
+        progress = max(0, min(100, progress))
         return self.update_goal(goal_id, progress=progress)
 
     def complete_goal(self, goal_id: str) -> bool:
-        """完成目标"""
-        return self.update_goal(goal_id, status=GoalStatus.COMPLETED, progress=100)
+        """Mark goal as completed.
+
+        Args:
+            goal_id: Goal identifier
+
+        Returns:
+            True if completed, False if not found
+        """
+        return self.update_goal(goal_id, status=GoalStatus.COMPLETED.value, progress=100)
 
     def pause_goal(self, goal_id: str) -> bool:
-        """暂停目标"""
+        """Pause goal.
+
+        Args:
+            goal_id: Goal identifier
+
+        Returns:
+            True if paused, False if not found
+        """
         return self.update_goal_status(goal_id, GoalStatus.PAUSED)
 
     def resume_goal(self, goal_id: str) -> bool:
-        """恢复目标"""
+        """Resume paused goal.
+
+        Args:
+            goal_id: Goal identifier
+
+        Returns:
+            True if resumed, False if not found
+        """
         return self.update_goal_status(goal_id, GoalStatus.ACTIVE)
 
     def cancel_goal(self, goal_id: str) -> bool:
-        """取消目标"""
+        """Cancel goal.
+
+        Args:
+            goal_id: Goal identifier
+
+        Returns:
+            True if cancelled, False if not found
+        """
         return self.update_goal_status(goal_id, GoalStatus.CANCELLED)
 
     def delete_goal(self, goal_id: str) -> bool:
-        """删除目标"""
-        if goal_id in self.goals:
-            del self.goals[goal_id]
-            # 🆕 使用延迟保存
-            self._schedule_save()
-            logger.debug(f"删除了目标（延迟保存）: {goal_id}")
-            return True
-        return False
-
-    def cleanup_old_goals(self, days: int = 30) -> int:
-        """
-        清理旧的已完成/已取消目标
+        """Delete goal.
 
         Args:
-            days: 保留最近N天的目标，默认30天
+            goal_id: Goal identifier
 
         Returns:
-            清理的目标数量
+            True if deleted, False if not found
+        """
+        deleted = self.db.delete_goal(goal_id)
+        if deleted:
+            logger.debug(f"Deleted goal: {goal_id}")
+        return deleted
+
+    def cleanup_old_goals(self, days: int = 30) -> int:
+        """Clean up old completed/cancelled goals.
+
+        Args:
+            days: Keep goals from last N days (default: 30)
+
+        Returns:
+            Number of goals cleaned up
         """
         cutoff_date = datetime.now() - timedelta(days=days)
-        to_delete = []
 
-        # 使用list()复制字典，避免在迭代时修改字典
-        for goal_id, goal in list(self.goals.items()):
-            # 只清理已完成或已取消的目标
-            if goal.status in [GoalStatus.COMPLETED, GoalStatus.CANCELLED]:
-                # 检查创建时间是否超过保留期限
-                if goal.created_at and goal.created_at < cutoff_date:
-                    to_delete.append(goal_id)
+        # Delete old completed goals
+        completed_count = self.db.delete_goals_by_status(
+            status=GoalStatus.COMPLETED.value,
+            older_than=cutoff_date
+        )
 
-        # 执行删除
-        for goal_id in to_delete:
-            del self.goals[goal_id]
+        # Delete old cancelled goals
+        cancelled_count = self.db.delete_goals_by_status(
+            status=GoalStatus.CANCELLED.value,
+            older_than=cutoff_date
+        )
 
-        if to_delete:
-            self._save_goals()
-            logger.info(f"🧹 清理了 {len(to_delete)} 个旧目标（{days}天前）")
+        total = completed_count + cancelled_count
 
-        return len(to_delete)
+        if total > 0:
+            logger.info(f"Cleaned up {total} old goals (older than {days} days)")
+
+        return total
 
     def mark_goal_executed(self, goal_id: str):
-        """标记目标已执行"""
-        goal = self.goals.get(goal_id)
+        """Mark goal as executed.
+
+        Args:
+            goal_id: Goal identifier
+        """
+        goal = self.get_goal(goal_id)
         if goal:
             goal.mark_executed()
-            # 🆕 使用延迟保存
-            self._schedule_save()
+            self.update_goal(
+                goal_id,
+                last_executed_at=goal.last_executed_at,
+                execution_count=goal.execution_count
+            )
 
     def get_goals_summary(self, chat_id: Optional[str] = None) -> str:
-        """获取目标摘要"""
+        """Get goals summary.
+
+        Args:
+            chat_id: Optional chat ID filter
+
+        Returns:
+            Formatted summary string
+        """
         goals = self.get_all_goals(chat_id=chat_id)
 
         if not goals:
             return "📋 当前没有任何目标"
 
-        # 按状态分组
+        # Group by status
         active = [g for g in goals if g.status == GoalStatus.ACTIVE]
         paused = [g for g in goals if g.status == GoalStatus.PAUSED]
         completed = [g for g in goals if g.status == GoalStatus.COMPLETED]
@@ -646,7 +653,7 @@ class GoalManager:
 
         if paused:
             lines.append(f"\n⏸️ 暂停目标 ({len(paused)}个):")
-            for goal in paused[:3]:  # 只显示前3个
+            for goal in paused[:3]:  # Show first 3
                 lines.append(f"   - {goal.name}")
 
         if completed:
@@ -654,13 +661,34 @@ class GoalManager:
 
         return "\n".join(lines)
 
+    def get_stats(self) -> Dict[str, Any]:
+        """Get database statistics.
 
-# 全局单例
+        Returns:
+            Dictionary with statistics
+        """
+        return self.db.get_stats()
+
+    def vacuum(self):
+        """Optimize database (should be run periodically)."""
+        self.db.vacuum()
+        logger.info("Database optimized")
+
+    def close(self):
+        """Close database connection."""
+        self.db.close()
+
+
+# Global singleton
 _goal_manager: Optional[GoalManager] = None
 
 
 def get_goal_manager() -> GoalManager:
-    """获取全局目标管理器实例"""
+    """Get global goal manager instance.
+
+    Returns:
+        GoalManager singleton instance
+    """
     global _goal_manager
     if _goal_manager is None:
         _goal_manager = GoalManager()

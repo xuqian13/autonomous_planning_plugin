@@ -1,6 +1,15 @@
-"""
-自动日程调度器
-定时生成每日日程
+"""Automatic Schedule Scheduler.
+
+This module provides automatic scheduling functionality that generates
+daily schedules at configured times.
+
+The scheduler runs as a background task and automatically creates
+new daily schedules based on configuration settings.
+
+Example:
+    >>> from auto_scheduler import ScheduleAutoScheduler
+    >>> scheduler = ScheduleAutoScheduler(plugin)
+    >>> await scheduler.start()  # Start background task
 """
 
 import asyncio
