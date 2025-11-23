@@ -389,6 +389,19 @@ class GenerateScheduleTool(BaseTool):
                 "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", True),
                 "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 2),
                 "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
+                "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 6),
+                "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 12),
+                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+                "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 30),
+                "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
+                "custom_model": {
+                    "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
+                    "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),
+                    "api_base": self.get_config("autonomous_planning.schedule.custom_model.api_base", ""),
+                    "api_key": self.get_config("autonomous_planning.schedule.custom_model.api_key", ""),
+                    "provider": self.get_config("autonomous_planning.schedule.custom_model.provider", "openai"),
+                    "temperature": self.get_config("autonomous_planning.schedule.custom_model.temperature", 0.7),
+                },
             }
             schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
             schedule_type = ScheduleType(schedule_type_str)
@@ -460,6 +473,19 @@ class ApplyScheduleTool(BaseTool):
                 "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", True),
                 "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 2),
                 "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.85),
+                "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 6),
+                "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 12),
+                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+                "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 30),
+                "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
+                "custom_model": {
+                    "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
+                    "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),
+                    "api_base": self.get_config("autonomous_planning.schedule.custom_model.api_base", ""),
+                    "api_key": self.get_config("autonomous_planning.schedule.custom_model.api_key", ""),
+                    "provider": self.get_config("autonomous_planning.schedule.custom_model.provider", "openai"),
+                    "temperature": self.get_config("autonomous_planning.schedule.custom_model.temperature", 0.7),
+                },
             }
             schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
 
@@ -729,6 +755,15 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
                 "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
                 "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
+                "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
+                "custom_model": {
+                    "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
+                    "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),
+                    "api_base": self.get_config("autonomous_planning.schedule.custom_model.api_base", ""),
+                    "api_key": self.get_config("autonomous_planning.schedule.custom_model.api_key", ""),
+                    "provider": self.get_config("autonomous_planning.schedule.custom_model.provider", "openai"),
+                    "temperature": self.get_config("autonomous_planning.schedule.custom_model.temperature", 0.7),
+                },
             }
             schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
 
@@ -847,14 +882,15 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                             if hasattr(message, 'message_base_info') and message.message_base_info:
                                 user_id = message.message_base_info.get('user_id', 'system')
 
-                            # P0修复：添加超时保护（2分钟）
+                            # P0修复：添加超时保护（可配置，默认3分钟）
+                            generation_timeout = self.get_config("autonomous_planning.schedule.generation_timeout", 180.0)
                             try:
                                 generation_success = await asyncio.wait_for(
                                     self._auto_generate_today_schedule(user_id, chat_id="global"),
-                                    timeout=120.0
+                                    timeout=generation_timeout
                                 )
                             except asyncio.TimeoutError:
-                                logger.error("⏰ 日程生成超时（120秒），跳过本次生成")
+                                logger.error(f"⏰ 日程生成超时（{generation_timeout}秒），跳过本次生成")
                                 generation_success = False
 
                             if generation_success:
@@ -1120,10 +1156,31 @@ class PlanningCommand(BaseCommand):
         """从目标中提取时间窗口（统一使用工具函数）"""
         return get_time_window_from_goal(goal)
 
+    def _check_permission(self) -> bool:
+        """检查用户权限"""
+        try:
+            admin_users = self.get_config("autonomous_planning.schedule.admin_users", [])
+            # 如果没有配置管理员（空列表），则所有人都有权限
+            if not admin_users:
+                return True
+
+            user_id = str(self.message.message_info.user_info.user_id)
+            return user_id in admin_users
+        except Exception as e:
+            logger.warning(f"检查权限失败: {e}")
+            # 出错时默认有权限（保持向后兼容）
+            return True
+
     async def execute(self) -> Tuple[bool, str, bool]:
         """执行命令"""
         command_text = self.matched_groups.get("planning_cmd", "").strip()
         parts = command_text.split()
+
+        # 检查权限（所有命令都需要管理员权限）
+        has_permission = self._check_permission()
+        if not has_permission:
+            await self.send_text("🚫 你不是管理员哦~只有管理员才能查看和管理日程呢")
+            return True, "没有权限", True
 
         if len(parts) == 1:
             await self._show_help()
@@ -1463,6 +1520,53 @@ class AutonomousPlanningPlugin(BasePlugin):
                     default="Asia/Shanghai",
                     description="时区设置"
                 ),
+                "admin_users": ConfigField(
+                    type=list,
+                    default=[],
+                    description="有权限使用命令的管理员QQ号列表，格式: [\"12345\", \"67890\"]"
+                ),
+                "max_tokens": ConfigField(
+                    type=int,
+                    default=8192,
+                    description="日程生成的最大token数"
+                ),
+                "generation_timeout": ConfigField(
+                    type=float,
+                    default=180.0,
+                    description="日程生成超时时间（秒）"
+                ),
+                "custom_model": {
+                    "enabled": ConfigField(
+                        type=bool,
+                        default=False,
+                        description="是否启用自定义模型"
+                    ),
+                    "model_name": ConfigField(
+                        type=str,
+                        default="",
+                        description="模型名称"
+                    ),
+                    "api_base": ConfigField(
+                        type=str,
+                        default="",
+                        description="API地址"
+                    ),
+                    "api_key": ConfigField(
+                        type=str,
+                        default="",
+                        description="API密钥"
+                    ),
+                    "provider": ConfigField(
+                        type=str,
+                        default="",
+                        description="提供商类型"
+                    ),
+                    "temperature": ConfigField(
+                        type=float,
+                        default=0.7,
+                        description="温度参数（0.0-1.0）"
+                    ),
+                },
             },
         },
     }
