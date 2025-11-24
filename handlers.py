@@ -88,8 +88,14 @@ class AutonomousPlannerEventHandler(BaseEventHandler):
             logger.info("✅ 目标清理循环已停止")
 
     async def _cleanup_old_goals(self):
-        """清理已完成/已取消的旧目标（保留30天）"""
+        """清理旧目标和过期日程"""
         try:
+            # 1. 清理过期的日程（昨天及更早的ACTIVE日程）
+            expired_schedules = self.goal_manager.cleanup_expired_schedules()
+            if expired_schedules > 0:
+                logger.info(f"🧹 清理了 {expired_schedules} 个过期日程（昨天及更早）")
+
+            # 2. 清理已完成/已取消的旧目标（保留30天）
             cleanup_days = self.get_config("autonomous_planning.cleanup_old_goals_days", 30)
             cleaned_count = self.goal_manager.cleanup_old_goals(days=cleanup_days)
             if cleaned_count > 0:
@@ -366,13 +372,28 @@ class ScheduleInjectEventHandler(BaseEventHandler):
 
                             # P0修复：添加超时保护（可配置，默认3分钟）
                             generation_timeout = self.get_config("autonomous_planning.schedule.generation_timeout", 180.0)
+                            generation_task = None
                             try:
+                                # 🆕 创建任务以便超时时主动取消
+                                generation_task = asyncio.create_task(
+                                    self._auto_generate_today_schedule(user_id, chat_id="global")
+                                )
                                 generation_success = await asyncio.wait_for(
-                                    self._auto_generate_today_schedule(user_id, chat_id="global"),
+                                    generation_task,
                                     timeout=generation_timeout
                                 )
                             except asyncio.TimeoutError:
                                 logger.error(f"⏰ 日程生成超时（{generation_timeout}秒），跳过本次生成")
+                                # 🆕 P0级：超时后主动取消任务，避免后台继续运行
+                                if generation_task and not generation_task.done():
+                                    generation_task.cancel()
+                                    try:
+                                        await generation_task
+                                    except asyncio.CancelledError:
+                                        logger.debug("已取消超时的日程生成任务")
+                                generation_success = False
+                            except Exception as e:
+                                logger.error(f"日程生成异常: {e}", exc_info=True)
                                 generation_success = False
 
                             if generation_success:
@@ -415,7 +436,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
     def _cleanup_expired_cache(self, current_time: float):
         """清理过期的缓存项（P0修复：线程安全）"""
         # 使用锁保护，防止与并发的get/set操作冲突
-        with self._schedule_cache._sync_lock:
+        with self._schedule_cache._lock:
             expired_keys = []
 
             # 使用list()创建快照避免迭代时修改

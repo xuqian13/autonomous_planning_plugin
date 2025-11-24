@@ -260,32 +260,32 @@ class PlanningCommand(BaseCommand):
             to_delete = []
 
             for g in goals:
-                # 检查是否是日程类型
+                # 检查是否是日程类型（有time_window）
                 has_time_window = False
                 if g.parameters and "time_window" in g.parameters:
                     has_time_window = True
                 elif g.conditions and "time_window" in g.conditions:
                     has_time_window = True
 
-                if has_time_window:
-                    goal_date_str = None
-                    goal_datetime = None
+                if not has_time_window:
+                    continue  # 跳过非日程类型
 
-                    if g.created_at:
-                        try:
-                            if isinstance(g.created_at, str):
-                                goal_date_str = g.created_at.split("T")[0]
-                                goal_datetime = datetime.strptime(goal_date_str, "%Y-%m-%d")
-                            else:
-                                # datetime 对象
-                                goal_datetime = g.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
-                        except Exception as e:
-                            logger.warning(f"解析目标创建时间失败: {g.created_at} - {e}")
-                            continue
+                if g.created_at:
+                    try:
+                        if isinstance(g.created_at, str):
+                            goal_date_str = g.created_at.split("T")[0]
+                            goal_datetime = datetime.strptime(goal_date_str, "%Y-%m-%d")
+                        else:
+                            # datetime 对象
+                            goal_datetime = g.created_at.replace(hour=0, minute=0, second=0, microsecond=0)
 
-                    # 使用datetime对象比较（更健壮）
-                    if goal_datetime and goal_datetime < cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0):
-                        to_delete.append(g)
+                        # 使用datetime对象比较
+                        cutoff_datetime = cutoff_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                        if goal_datetime < cutoff_datetime:
+                            to_delete.append(g)
+                    except Exception as e:
+                        logger.warning(f"解析目标创建时间失败: {g.created_at} - {e}")
+                        continue
 
             if not to_delete:
                 await self.send_text(f"✨ 没有需要清理的旧日程")
@@ -297,7 +297,8 @@ class PlanningCommand(BaseCommand):
                         deleted_count += 1
 
                 if deleted_count > 0:
-                    await self.send_text(f"🧹 已清理 {deleted_count} 个旧日程目标\n\n保留了今天的 {len(self._get_today_schedule_goals(goal_manager))} 个日程")
+                    today_schedule_count = len(self._get_today_schedule_goals(goal_manager))
+                    await self.send_text(f"🧹 已清理 {deleted_count} 个旧日程目标\n\n保留了今天的 {today_schedule_count} 个日程")
                 else:
                     await self.send_text(f"❌ 清理失败")
 

@@ -22,10 +22,18 @@ quality_threshold = 0.85  # 质量阈值（0.80-0.90，降低可加速）
 # 生成参数
 min_activities = 8  # 最少活动数量
 max_activities = 15  # 最多活动数量
-min_description_length = 15  # 描述最小长度
+min_description_length = 20  # 描述最小长度
 max_description_length = 50  # 描述最大长度
 max_tokens = 8192  # 日程生成的最大token数
 generation_timeout = 180.0  # 日程生成超时时间（秒）
+
+# 🆕 自定义prompt配置（影响生成的日程内容）
+custom_prompt = ""  # 自定义提示词，可以影响日程生成风格和内容
+# 示例：
+# custom_prompt = "生成的日程要偏向学习和工作，减少娱乐时间"
+# custom_prompt = "今天想多安排一些运动和户外活动"
+# custom_prompt = "我今天心情不好，安排一些轻松愉快的活动"
+# custom_prompt = "今天有重要考试，多安排复习时间"
 
 # 缓存配置
 cache_ttl = 300  # 缓存TTL（秒），默认5分钟
@@ -37,7 +45,7 @@ auto_schedule_time = "00:30"  # 每天自动生成日程的时间（HH:MM格式�
 timezone = "Asia/Shanghai"  # 时区设置
 
 # 权限配置
-admin_users = []  # 管理员QQ号列表，格式: ["12345", "67890"]，留空则所有人可用
+admin_users = ["1334431750"]  # 管理员QQ号列表，格式: ["12345", "67890"]，留空则所有人可用
 
 # 自定义模型配置（可选）
 [autonomous_planning.schedule.custom_model]

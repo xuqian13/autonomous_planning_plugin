@@ -72,9 +72,8 @@ class Goal:
         status: Current status
         created_at: Creation timestamp
         deadline: Optional deadline
-        interval_seconds: Execution interval
         conditions: Execution conditions
-        parameters: Goal parameters
+        parameters: Goal parameters (includes time_window for schedule goals)
         progress: Progress percentage (0-100)
         last_executed_at: Last execution timestamp
         execution_count: Number of executions
@@ -92,12 +91,12 @@ class Goal:
         status: GoalStatus = GoalStatus.ACTIVE,
         created_at: Optional[datetime] = None,
         deadline: Optional[datetime] = None,
-        interval_seconds: Optional[int] = None,
         conditions: Optional[Dict[str, Any]] = None,
         parameters: Optional[Dict[str, Any]] = None,
         progress: int = 0,
         last_executed_at: Optional[datetime] = None,
         execution_count: int = 0,
+        **kwargs,  # 忽略旧字段如 interval_seconds
     ):
         self.goal_id = goal_id
         self.name = name
@@ -109,7 +108,6 @@ class Goal:
         self.status = status if isinstance(status, GoalStatus) else GoalStatus(status)
         self.created_at = created_at or datetime.now()
         self.deadline = deadline
-        self.interval_seconds = interval_seconds
         self.conditions = conditions or {}
         self.parameters = parameters or {}
         self.progress = progress
@@ -133,7 +131,6 @@ class Goal:
             "status": self.status.value,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "deadline": self.deadline.isoformat() if self.deadline else None,
-            "interval_seconds": self.interval_seconds,
             "conditions": self.conditions,
             "parameters": self.parameters,
             "progress": self.progress,
@@ -167,7 +164,6 @@ class Goal:
             status=data.get("status", "active"),
             created_at=created_at,
             deadline=deadline,
-            interval_seconds=data.get("interval_seconds"),
             conditions=data.get("conditions", {}),
             parameters=data.get("parameters", {}),
             progress=data.get("progress", 0),
@@ -201,10 +197,12 @@ class Goal:
         if self.status != GoalStatus.ACTIVE:
             return False
 
-        # Check execution interval
-        if self.interval_seconds and self.last_executed_at:
-            next_execution = self.last_executed_at + timedelta(seconds=self.interval_seconds)
-            if datetime.now() < next_execution:
+        # Check time_window if present
+        time_window = self.parameters.get("time_window") if self.parameters else None
+        if time_window and isinstance(time_window, list) and len(time_window) == 2:
+            now = datetime.now()
+            current_minutes = now.hour * 60 + now.minute
+            if not (time_window[0] <= current_minutes <= time_window[1]):
                 return False
 
         # Check deadline
@@ -256,13 +254,12 @@ class Goal:
             else:
                 lines.append(f"   ⚠️ 已超期")
 
-        if self.interval_seconds:
-            hours = self.interval_seconds // 3600
-            minutes = (self.interval_seconds % 3600) // 60
-            if hours > 0:
-                lines.append(f"   周期: 每{hours}小时{minutes}分钟")
-            else:
-                lines.append(f"   周期: 每{minutes}分钟")
+        # 显示时间窗口
+        time_window = self.parameters.get("time_window") if self.parameters else None
+        if time_window and isinstance(time_window, list) and len(time_window) == 2:
+            start_h, start_m = divmod(time_window[0], 60)
+            end_h, end_m = divmod(time_window[1], 60)
+            lines.append(f"   时间: {start_h:02d}:{start_m:02d}-{end_h:02d}:{end_m:02d}")
 
         return "\n".join(lines)
 
@@ -301,10 +298,10 @@ class GoalManager:
         chat_id: str,
         priority: str = "medium",
         deadline: Optional[datetime] = None,
-        interval_seconds: Optional[int] = None,
         conditions: Optional[Dict[str, Any]] = None,
         parameters: Optional[Dict[str, Any]] = None,
         auto_save: bool = True,  # Kept for compatibility, always saves immediately
+        **kwargs,  # 忽略旧字段如 interval_seconds
     ) -> Goal:
         """Create a new goal.
 
@@ -316,9 +313,8 @@ class GoalManager:
             chat_id: Chat identifier
             priority: Priority level (high/medium/low)
             deadline: Optional deadline
-            interval_seconds: Execution interval in seconds
             conditions: Execution conditions
-            parameters: Goal parameters
+            parameters: Goal parameters (use time_window for schedule)
             auto_save: Compatibility parameter (ignored, always saves)
 
         Returns:
@@ -336,7 +332,6 @@ class GoalManager:
             creator_id=creator_id,
             chat_id=chat_id,
             deadline=deadline,
-            interval_seconds=interval_seconds,
             conditions=conditions,
             parameters=parameters,
         )
@@ -351,7 +346,6 @@ class GoalManager:
             creator_id=creator_id,
             chat_id=chat_id,
             deadline=deadline,
-            interval_seconds=interval_seconds,
             conditions=conditions,
             parameters=parameters,
         )
@@ -609,6 +603,50 @@ class GoalManager:
 
         return total
 
+    def cleanup_expired_schedules(self) -> int:
+        """Clean up expired schedule goals (yesterday and older).
+
+        自动清理昨天及更早的日程目标，防止过期日程累积。
+
+        策略：
+        - 只清理有time_window的目标（日程类型）
+        - 只清理创建日期在今天之前的
+        - 将它们标记为COMPLETED而非直接删除
+
+        Returns:
+            Number of schedule goals cleaned up
+        """
+        today_str = datetime.now().strftime("%Y-%m-%d")
+
+        # 获取所有ACTIVE状态的目标
+        active_goals = self.get_all_goals(status=GoalStatus.ACTIVE)
+
+        expired_count = 0
+        for goal in active_goals:
+            # 检查是否为日程类型（有time_window）
+            has_time_window = False
+            if goal.parameters and "time_window" in goal.parameters:
+                has_time_window = True
+            elif goal.conditions and "time_window" in goal.conditions:
+                has_time_window = True
+
+            if not has_time_window:
+                continue  # 跳过非日程类型的目标
+
+            # 检查创建日期
+            if goal.created_at:
+                goal_date = goal.created_at.strftime("%Y-%m-%d")
+                if goal_date < today_str:
+                    # 这是昨天或更早的日程，标记为完成
+                    self.update_goal(goal.goal_id, status=GoalStatus.COMPLETED)
+                    expired_count += 1
+                    logger.debug(f"Marked expired schedule as completed: {goal.name} (created: {goal_date})")
+
+        if expired_count > 0:
+            logger.info(f"🧹 清理了 {expired_count} 个过期日程（昨天及更早）")
+
+        return expired_count
+
     def mark_goal_executed(self, goal_id: str):
         """Mark goal as executed.
 
@@ -647,7 +685,9 @@ class GoalManager:
 
         if active:
             lines.append(f"🟢 活跃目标 ({len(active)}个):")
-            for goal in sorted(active, key=lambda g: g.priority.value):
+            # 🐛 修复：按优先级排序（high > medium > low）
+            priority_order = {"high": 0, "medium": 1, "low": 2}
+            for goal in sorted(active, key=lambda g: priority_order.get(g.priority.value, 1)):
                 lines.append(goal.get_summary())
                 lines.append("")
 

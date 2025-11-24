@@ -1,7 +1,16 @@
-"""自主规划插件 - 工具模块"""
+"""自主规划插件 - 工具模块
+
+提供LLM可调用的工具，用于管理目标和生成日程。
+
+工具列表：
+    - ManageGoalTool: 目标管理（创建、查看、更新、删除等）
+    - GetPlanningStatusTool: 获取规划状态
+    - GenerateScheduleTool: 生成日程
+    - ApplyScheduleTool: 应用日程
+"""
 
 import json
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
 
 from src.plugin_system import BaseTool
@@ -10,8 +19,177 @@ from src.common.logger import get_logger
 
 from .planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
 from .planner.schedule_generator import ScheduleGenerator, ScheduleType
+from .exceptions import InvalidParametersError, InvalidTimeWindowError
 
 logger = get_logger("autonomous_planning.tools")
+
+
+def _parse_json_parameters(raw_params: Any) -> Dict[str, Any]:
+    """解析JSON参数（字符串或字典）。
+
+    Args:
+        raw_params: 原始参数，可能是JSON字符串或字典
+
+    Returns:
+        解析后的字典
+    """
+    if isinstance(raw_params, str):
+        try:
+            return json.loads(raw_params)
+        except json.JSONDecodeError:
+            logger.warning(f"无法解析参数JSON: {raw_params}")
+            return {}
+    elif isinstance(raw_params, dict):
+        return raw_params
+    return {}
+
+
+def _parse_time_window_str(time_window_str: str) -> Optional[List[int]]:
+    """解析时间窗口字符串为分钟数列表。
+
+    Args:
+        time_window_str: 时间窗口字符串，格式 "HH:MM-HH:MM"
+
+    Returns:
+        [start_minutes, end_minutes] 或 None（解析失败）
+    """
+    try:
+        parts = time_window_str.split("-")
+        if len(parts) != 2:
+            return None
+        start_parts = parts[0].strip().split(":")
+        end_parts = parts[1].strip().split(":")
+        start_minutes = int(start_parts[0]) * 60 + int(start_parts[1])
+        end_minutes = int(end_parts[0]) * 60 + int(end_parts[1])
+        return [start_minutes, end_minutes]
+    except (ValueError, IndexError):
+        return None
+
+
+def _validate_parameters_schema(params: Dict[str, Any], goal_type: str = None) -> Tuple[bool, Optional[str]]:
+    """验证目标参数的schema结构。
+
+    Args:
+        params: 要验证的参数字典
+        goal_type: 目标类型（用于特定验证）
+
+    Returns:
+        (is_valid, error_message): 验证结果和错误消息
+
+    Raises:
+        InvalidParametersError: 参数验证失败时
+
+    Schema规范:
+        - time_window: 必须是包含2个整数的列表 [start_minutes, end_minutes]
+        - topics: 必须是字符串列表（learn_topic类型必需）
+        - depth: 必须是字符串（learn_topic类型必需）
+        - check_plugins: 必须是布尔值（health_check类型建议）
+        - greeting_type: 必须是字符串（social_maintenance类型建议）
+    """
+    if not isinstance(params, dict):
+        raise InvalidParametersError("参数必须是字典类型", invalid_value=type(params).__name__)
+
+    # 验证 time_window
+    if "time_window" in params:
+        time_window = params["time_window"]
+        if not isinstance(time_window, list):
+            raise InvalidTimeWindowError(
+                f"time_window必须是列表，当前类型: {type(time_window).__name__}",
+                time_window=time_window
+            )
+        if len(time_window) != 2:
+            raise InvalidTimeWindowError(
+                f"time_window必须包含2个元素，当前: {len(time_window)}个",
+                time_window=time_window
+            )
+        if not all(isinstance(x, int) for x in time_window):
+            raise InvalidTimeWindowError(
+                f"time_window的元素必须是整数，当前: {[type(x).__name__ for x in time_window]}",
+                time_window=time_window
+            )
+        # 验证取值范围 (0-1440分钟 = 24小时)
+        start, end = time_window
+        if not (0 <= start < 1440 and 0 < end <= 1440):
+            raise InvalidTimeWindowError(
+                f"time_window的值必须在0-1440范围内，当前: {time_window}",
+                time_window=time_window
+            )
+        if start >= end:
+            raise InvalidTimeWindowError(
+                f"time_window的起始时间必须小于结束时间，当前: {time_window}",
+                time_window=time_window
+            )
+
+    # 验证 topics（learn_topic类型）
+    if goal_type == "learn_topic":
+        if "topics" not in params:
+            raise InvalidParametersError(
+                "learn_topic类型的目标必须包含topics参数",
+                field_name="topics"
+            )
+        topics = params["topics"]
+        if not isinstance(topics, list):
+            raise InvalidParametersError(
+                f"topics必须是列表，当前类型: {type(topics).__name__}",
+                field_name="topics",
+                invalid_value=topics
+            )
+        if not all(isinstance(t, str) for t in topics):
+            raise InvalidParametersError(
+                "topics的元素必须都是字符串",
+                field_name="topics",
+                invalid_value=topics
+            )
+        if len(topics) == 0:
+            raise InvalidParametersError(
+                "topics列表不能为空",
+                field_name="topics",
+                invalid_value=topics
+            )
+
+        # 验证 depth
+        if "depth" not in params:
+            raise InvalidParametersError(
+                "learn_topic类型的目标必须包含depth参数",
+                field_name="depth"
+            )
+        depth = params["depth"]
+        if not isinstance(depth, str):
+            raise InvalidParametersError(
+                f"depth必须是字符串，当前类型: {type(depth).__name__}",
+                field_name="depth",
+                invalid_value=depth
+            )
+        valid_depths = ["basic", "intermediate", "advanced"]
+        if depth not in valid_depths:
+            raise InvalidParametersError(
+                f"depth必须是以下之一: {valid_depths}，当前: {depth}",
+                field_name="depth",
+                invalid_value=depth
+            )
+
+    # 验证 check_plugins（health_check类型）
+    if "check_plugins" in params:
+        check_plugins = params["check_plugins"]
+        if not isinstance(check_plugins, bool):
+            raise InvalidParametersError(
+                f"check_plugins必须是布尔值，当前类型: {type(check_plugins).__name__}",
+                field_name="check_plugins",
+                invalid_value=check_plugins
+            )
+
+    # 验证 greeting_type（social_maintenance类型）
+    if "greeting_type" in params:
+        greeting_type = params["greeting_type"]
+        if not isinstance(greeting_type, str):
+            raise InvalidParametersError(
+                f"greeting_type必须是字符串，当前类型: {type(greeting_type).__name__}",
+                field_name="greeting_type",
+                invalid_value=greeting_type
+            )
+
+    return True, None
+
 
 class ManageGoalTool(BaseTool):
     """目标管理工具 - 创建、查看、更新和删除目标"""
@@ -25,7 +203,7 @@ class ManageGoalTool(BaseTool):
         ("description", ToolParamType.STRING, "目标描述 (create时必需)", False, None),
         ("goal_type", ToolParamType.STRING, "目标类型: health_check(系统检查/监控/健康检查), social_maintenance(问候/社交), learn_topic(学习/研究主题), custom(其他自定义目标). 根据目标名称和描述智能选择合适的类型", False, None),
         ("priority", ToolParamType.STRING, "优先级: high/medium/low", False, None),
-        ("interval_minutes", ToolParamType.FLOAT, "执行间隔（分钟）。例如：2表示每2分钟执行一次，60表示每小时执行一次", False, None),
+        ("time_window", ToolParamType.STRING, "时间窗口，格式为'HH:MM-HH:MM'。例如：'09:00-10:30'表示9点到10点半", False, None),
         ("deadline_hours", ToolParamType.FLOAT, "截止时间（从现在开始的小时数）", False, None),
         ("parameters", ToolParamType.STRING, "目标参数（JSON字符串）。health_check类型建议: {\"check_plugins\": true}; social_maintenance类型建议: {\"greeting_type\": \"morning\"}; learn_topic类型必需: {\"topics\": [\"主题1\", \"主题2\"], \"depth\": \"intermediate\"}", False, None),
     ]
@@ -60,15 +238,18 @@ class ManageGoalTool(BaseTool):
 
                 goal_type = function_args.get("goal_type", "custom")
                 priority = function_args.get("priority", "medium")
-                interval_minutes = function_args.get("interval_minutes")
+                time_window_str = function_args.get("time_window")
                 deadline_hours = function_args.get("deadline_hours")
 
-                # 参数验证
-                if interval_minutes is not None:
-                    if interval_minutes <= 0:
-                        return {"type": "error", "content": "间隔时间必须大于0分钟"}
-                    if interval_minutes > 525600:  # 1年
-                        return {"type": "error", "content": "间隔时间不能超过1年"}
+                # 解析时间窗口
+                time_window = None
+                if time_window_str:
+                    time_window = _parse_time_window_str(time_window_str)
+                    if time_window is None:
+                        return {
+                            "type": "error",
+                            "content": "时间窗口格式错误，应为'HH:MM-HH:MM'"
+                        }
 
                 if deadline_hours is not None:
                     if deadline_hours <= 0:
@@ -77,21 +258,24 @@ class ManageGoalTool(BaseTool):
                         return {"type": "error", "content": "截止时间不能超过10年"}
 
                 # 解析parameters参数
-                parameters_raw = function_args.get("parameters", {})
-                if isinstance(parameters_raw, str):
-                    try:
-                        parameters = json.loads(parameters_raw)
-                    except json.JSONDecodeError:
-                        logger.warning(f"无法解析参数 JSON: {parameters_raw}")
-                        parameters = {}
-                elif isinstance(parameters_raw, dict):
-                    parameters = parameters_raw
-                else:
-                    parameters = {}
+                parameters = _parse_json_parameters(function_args.get("parameters", {}))
 
                 # 计算时间
-                interval_seconds = int(interval_minutes * 60) if interval_minutes else None
                 deadline = datetime.now() + timedelta(hours=deadline_hours) if deadline_hours else None
+
+                # 将time_window存入parameters
+                if time_window:
+                    parameters["time_window"] = time_window
+
+                # 🆕 P0级：验证parameters的schema
+                try:
+                    _validate_parameters_schema(parameters, goal_type)
+                except (InvalidParametersError, InvalidTimeWindowError) as e:
+                    logger.warning(f"参数验证失败: {e}")
+                    return {
+                        "type": "error",
+                        "content": f"参数验证失败: {str(e)}"
+                    }
 
                 goal = goal_manager.create_goal(
                     name=name,
@@ -101,7 +285,6 @@ class ManageGoalTool(BaseTool):
                     chat_id=chat_id,
                     priority=priority,
                     deadline=deadline,
-                    interval_seconds=interval_seconds,
                     parameters=parameters,
                 )
 
@@ -140,19 +323,22 @@ class ManageGoalTool(BaseTool):
                     update_params["description"] = function_args["description"]
                 if "priority" in function_args:
                     update_params["priority"] = GoalPriority(function_args["priority"])
-                if "interval_minutes" in function_args:
-                    update_params["interval_seconds"] = int(function_args["interval_minutes"] * 60)
+                if "time_window" in function_args:
+                    tw = _parse_time_window_str(function_args["time_window"])
+                    if tw is None:
+                        return {
+                            "type": "error",
+                            "content": "时间窗口格式错误，应为'HH:MM-HH:MM'"
+                        }
+                    goal = goal_manager.get_goal(goal_id)
+                    if goal:
+                        params = goal.parameters.copy() if goal.parameters else {}
+                        params["time_window"] = tw
+                        update_params["parameters"] = params
                 if "parameters" in function_args:
-                    # 处理 parameters：可能是字符串（JSON）或字典
-                    parameters_raw = function_args["parameters"]
-                    if isinstance(parameters_raw, str):
-                        try:
-                            update_params["parameters"] = json.loads(parameters_raw)
-                        except json.JSONDecodeError:
-                            logger.warning(f"无法解析参数 JSON: {parameters_raw}")
-                            update_params["parameters"] = {}
-                    else:
-                        update_params["parameters"] = parameters_raw
+                    update_params["parameters"] = _parse_json_parameters(
+                        function_args["parameters"]
+                    )
 
                 success = goal_manager.update_goal(goal_id, **update_params)
 
@@ -414,7 +600,7 @@ class ApplyScheduleTool(BaseTool):
                     goal_type=item_data["goal_type"],
                     priority=item_data["priority"],
                     time_slot=item_data.get("time_slot"),
-                    interval_hours=item_data.get("interval_hours"),
+                    duration_hours=item_data.get("duration_hours"),
                     parameters=item_data.get("parameters", {}),
                     conditions=item_data.get("conditions", {}),
                 ))

@@ -4,9 +4,23 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*.egg-info/
+dist/
+build/
+
+# 临时文档和分析报告
+docs/
+*_REPORT.md
+*_SUGGESTIONS.md
 
 # 插件数据目录
 data/
+*.db
+*.db-shm
+*.db-wal
+
+# Claude AI
+.claude/
 
 # IDE
 .vscode/
@@ -17,3 +31,10 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Test coverage
+.coverage
+htmlcov/
