@@ -17,9 +17,9 @@ from src.plugin_system import BaseTool
 from src.llm_models.payload_content.tool_option import ToolParamType
 from src.common.logger import get_logger
 
-from .planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
-from .planner.schedule_generator import ScheduleGenerator, ScheduleType
-from .exceptions import InvalidParametersError, InvalidTimeWindowError
+from ..planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
+from ..planner.schedule_generator import ScheduleGenerator, ScheduleType
+from ..core.exceptions import InvalidParametersError, InvalidTimeWindowError
 
 logger = get_logger("autonomous_planning.tools")
 

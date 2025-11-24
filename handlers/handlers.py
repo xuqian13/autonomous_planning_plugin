@@ -8,10 +8,10 @@ from datetime import datetime
 from src.plugin_system import BaseEventHandler, EventType, MaiMessages, CustomEventHandlerResult
 from src.common.logger import get_logger
 
-from .planner.goal_manager import get_goal_manager
-from .planner.schedule_generator import ScheduleGenerator
-from .cache import LRUCache
-from .utils.time_utils import parse_time_window
+from ..planner.goal_manager import get_goal_manager
+from ..planner.schedule_generator import ScheduleGenerator
+from ..cache import LRUCache
+from ..utils.time_utils import parse_time_window
 
 logger = get_logger("autonomous_planning.handlers")
 

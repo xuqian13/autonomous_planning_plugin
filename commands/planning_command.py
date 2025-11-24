@@ -7,10 +7,10 @@ from datetime import datetime
 from src.plugin_system import BaseCommand
 from src.common.logger import get_logger
 
-from .planner.goal_manager import get_goal_manager, GoalStatus
-from .planner.schedule_generator import ScheduleGenerator, ScheduleType
-from .utils.schedule_image_generator import ScheduleImageGenerator
-from .utils.time_utils import format_minutes_to_time, get_time_window_from_goal
+from ..planner.goal_manager import get_goal_manager, GoalStatus
+from ..planner.schedule_generator import ScheduleGenerator, ScheduleType
+from ..utils.schedule_image_generator import ScheduleImageGenerator
+from ..utils.time_utils import format_minutes_to_time, get_time_window_from_goal
 
 logger = get_logger("autonomous_planning.commands")
 
