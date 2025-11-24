@@ -89,6 +89,10 @@ class ScheduleSemanticValidator:
             # 即使有警告也保留该项（只是记录）
             valid_items.append(item)
 
+        # 4. 检查时间连续性（整体验证）
+        continuity_warnings = self._check_time_continuity(items)
+        warnings.extend(continuity_warnings)
+
         return valid_items, warnings
 
     def _check_time_reasonableness(self, item: Dict) -> Optional[str]:
@@ -212,3 +216,59 @@ class ScheduleSemanticValidator:
             return int(parts[0]) * 60 + int(parts[1])
         except (ValueError, IndexError, AttributeError):
             return 0
+
+    def _check_time_continuity(self, items: List[Dict]) -> List[str]:
+        """检查时间连续性，检测活动之间的空档
+
+        Args:
+            items: 日程项列表
+
+        Returns:
+            警告列表
+        """
+        warnings = []
+
+        # 1. 提取并解析所有活动的时间信息
+        time_blocks = []
+        for item in items:
+            time_slot = item.get("time_slot", "")
+            duration_hours = item.get("duration_hours")
+
+            if not time_slot or not duration_hours:
+                continue
+
+            start_minutes = self._parse_time_to_minutes(time_slot)
+            end_minutes = start_minutes + int(duration_hours * 60)
+
+            time_blocks.append({
+                "name": item.get("name", "未命名"),
+                "start": start_minutes,
+                "end": end_minutes
+            })
+
+        if not time_blocks:
+            return warnings
+
+        # 2. 按开始时间排序
+        time_blocks.sort(key=lambda x: x["start"])
+
+        # 3. 检查相邻活动之间的空档
+        for i in range(len(time_blocks) - 1):
+            current_end = time_blocks[i]["end"]
+            next_start = time_blocks[i + 1]["start"]
+
+            if next_start > current_end:
+                gap_minutes = next_start - current_end
+                gap_hours = gap_minutes / 60.0
+
+                # 超过30分钟的空档视为问题
+                if gap_minutes >= 30:
+                    current_end_time = f"{current_end // 60:02d}:{current_end % 60:02d}"
+                    next_start_time = f"{next_start // 60:02d}:{next_start % 60:02d}"
+
+                    warnings.append(
+                        f"⚠️ 时间空档：{current_end_time}-{next_start_time} "
+                        f"({gap_hours:.1f}小时无安排)"
+                    )
+
+        return warnings

@@ -17,6 +17,7 @@ import datetime
 from typing import Optional
 
 from src.common.logger import get_logger
+from ..utils.timezone_manager import TimezoneManager
 
 logger = get_logger("autonomous_planning.auto_scheduler")
 
@@ -40,7 +41,6 @@ class ScheduleAutoScheduler:
         stop: 停止定时任务
         _schedule_loop: 定时任务循环
         _generate_today_schedule: 生成今日日程
-        _get_timezone_now: 获取配置时区的当前时间
     """
 
     def __init__(self, plugin):
@@ -55,6 +55,10 @@ class ScheduleAutoScheduler:
         self.task = None
         self.logger = get_logger("ScheduleAutoScheduler")
 
+        # 初始化时区管理器
+        timezone_str = plugin.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
+        self.tz_manager = TimezoneManager(timezone_str)
+
         # P1优化：指数退避参数
         self._retry_count = 0
         self._max_retry_wait = 300  # 最大等待5分钟
@@ -65,31 +69,6 @@ class ScheduleAutoScheduler:
 
         self.get_goal_manager = get_goal_manager
         self.ScheduleGenerator = ScheduleGenerator
-
-    def _get_timezone_now(self):
-        """
-        获取配置时区的当前时间
-
-        根据插件配置中的时区设置，返回对应时区的当前时间。
-        如果pytz模块未安装或时区配置错误，则回退到系统时间。
-
-        Returns:
-            datetime.datetime: 当前时间对象
-
-        Note:
-            默认时区为Asia/Shanghai，需要安装pytz模块支持时区转换
-        """
-        timezone_str = self.plugin.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
-        try:
-            import pytz
-            tz = pytz.timezone(timezone_str)
-            return datetime.datetime.now(tz)
-        except ImportError:
-            self.logger.warning("pytz模块未安装,使用系统时间")
-            return datetime.datetime.now()
-        except Exception as e:
-            self.logger.warning(f"时区处理出错: {e},使用系统时间")
-            return datetime.datetime.now()
 
     async def start(self):
         """
@@ -142,7 +121,7 @@ class ScheduleAutoScheduler:
         """
         while self.is_running:
             try:
-                now = self._get_timezone_now()
+                now = self.tz_manager.get_now()
                 schedule_time_str = self.plugin.get_config("autonomous_planning.schedule.auto_schedule_time", "00:30")
 
                 schedule_hour, schedule_minute = map(int, schedule_time_str.split(":"))
@@ -181,7 +160,8 @@ class ScheduleAutoScheduler:
         生成成功后会自动保存为目标，供后续使用。
         """
         try:
-            today = datetime.datetime.now().strftime("%Y-%m-%d")
+            # ✅ 使用时区管理器获取今天日期
+            today = self.tz_manager.get_now().strftime("%Y-%m-%d")
             self.logger.info(f"🔄 开始自动生成今日日程: {today}")
 
             # 检查今天是否已有日程（修复：支持datetime对象）

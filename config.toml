@@ -17,7 +17,7 @@ auto_generate = true  # 询问日程时自动检查并生成（推荐开启）
 # 多轮生成配置
 use_multi_round = true  # 启用多轮生成机制，提升质量（关闭可加速）
 max_rounds = 2  # 最多尝试轮数（1-3）
-quality_threshold = 0.85  # 质量阈值（0.80-0.90，降低可加速）
+quality_threshold = 0.80  # 质量阈值（0.80-0.90，降低可加速）
 
 # 生成参数
 min_activities = 8  # 最少活动数量

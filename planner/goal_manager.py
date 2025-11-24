@@ -476,6 +476,34 @@ class GoalManager:
                 if goal_date == date_str:
                     schedule_goals.append(goal)
 
+        # 去重：按 (name, time_window) 去重，防止重复日程显示
+        # 如果有多个相同名称和时间的日程，只保留第一个（通常是最先创建的）
+        if schedule_goals:
+            seen = set()
+            unique_goals = []
+
+            for goal in schedule_goals:
+                # 提取time_window作为唯一性标识的一部分
+                time_window = None
+                if goal.parameters and "time_window" in goal.parameters:
+                    time_window = tuple(goal.parameters["time_window"])
+                elif goal.conditions and "time_window" in goal.conditions:
+                    time_window = tuple(goal.conditions["time_window"])
+
+                # 使用 (name, time_window) 作为唯一键
+                key = (goal.name, time_window)
+
+                if key not in seen:
+                    seen.add(key)
+                    unique_goals.append(goal)
+                else:
+                    logger.debug(f"跳过重复日程: {goal.name} @ {time_window}")
+
+            if len(unique_goals) < len(schedule_goals):
+                logger.info(f"去重：{len(schedule_goals)} -> {len(unique_goals)} 个日程")
+
+            return unique_goals
+
         return schedule_goals
 
     def update_goal(self, goal_id: str, **kwargs) -> bool:
@@ -638,7 +666,7 @@ class GoalManager:
                 goal_date = goal.created_at.strftime("%Y-%m-%d")
                 if goal_date < today_str:
                     # 这是昨天或更早的日程，标记为完成
-                    self.update_goal(goal.goal_id, status=GoalStatus.COMPLETED)
+                    self.update_goal_status(goal.goal_id, GoalStatus.COMPLETED)
                     expired_count += 1
                     logger.debug(f"Marked expired schedule as completed: {goal.name} (created: {goal_date})")
 

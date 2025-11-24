@@ -12,6 +12,7 @@ from ..planner.goal_manager import get_goal_manager
 from ..planner.schedule_generator import ScheduleGenerator
 from ..cache import LRUCache
 from ..utils.time_utils import parse_time_window
+from .exception_handler import handle_exception, handle_exception_silent
 
 logger = get_logger("autonomous_planning.handlers")
 
@@ -87,21 +88,19 @@ class AutonomousPlannerEventHandler(BaseEventHandler):
 
             logger.info("✅ 目标清理循环已停止")
 
+    @handle_exception("清理旧目标失败: {e}", log_level="error", exc_info=True)
     async def _cleanup_old_goals(self):
         """清理旧目标和过期日程"""
-        try:
-            # 1. 清理过期的日程（昨天及更早的ACTIVE日程）
-            expired_schedules = self.goal_manager.cleanup_expired_schedules()
-            if expired_schedules > 0:
-                logger.info(f"🧹 清理了 {expired_schedules} 个过期日程（昨天及更早）")
+        # 1. 清理过期的日程（昨天及更早的ACTIVE日程）
+        expired_schedules = self.goal_manager.cleanup_expired_schedules()
+        if expired_schedules > 0:
+            logger.info(f"🧹 清理了 {expired_schedules} 个过期日程（昨天及更早）")
 
-            # 2. 清理已完成/已取消的旧目标（保留30天）
-            cleanup_days = self.get_config("autonomous_planning.cleanup_old_goals_days", 30)
-            cleaned_count = self.goal_manager.cleanup_old_goals(days=cleanup_days)
-            if cleaned_count > 0:
-                logger.info(f"🧹 清理了 {cleaned_count} 个旧目标（{cleanup_days}天前）")
-        except Exception as e:
-            logger.error(f"清理旧目标失败: {e}", exc_info=True)
+        # 2. 清理已完成/已取消的旧目标（保留30天）
+        cleanup_days = self.get_config("autonomous_planning.cleanup_old_goals_days", 30)
+        cleaned_count = self.goal_manager.cleanup_old_goals(days=cleanup_days)
+        if cleaned_count > 0:
+            logger.info(f"🧹 清理了 {cleaned_count} 个旧目标（{cleanup_days}天前）")
 
 
 class ScheduleInjectEventHandler(BaseEventHandler):
@@ -154,16 +153,37 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 logger.info("日程自动生成功能已启用")
             asyncio.create_task(self._preheat_cache())  # 启动缓存预热
 
+    def _get_timezone_now(self):
+        """
+        获取配置时区的当前时间
+
+        根据插件配置中的时区设置，返回对应时区的当前时间。
+        如果pytz模块未安装或时区配置错误，则回退到系统时间。
+
+        Returns:
+            datetime.datetime: 当前时间对象
+        """
+        timezone_str = self.get_config("autonomous_planning.schedule.timezone", "Asia/Shanghai")
+        try:
+            import pytz
+            tz = pytz.timezone(timezone_str)
+            return datetime.now(tz)
+        except ImportError:
+            logger.warning("pytz模块未安装，使用系统时间")
+            return datetime.now()
+        except Exception as e:
+            logger.warning(f"时区处理出错: {e}，使用系统时间")
+            return datetime.now()
+
+    @handle_exception_silent("缓存预热失败: {e}", log_level="warning")
     async def _preheat_cache(self):
         """预热缓存 - 启动时提前加载全局日程"""
-        try:
-            await asyncio.sleep(5)  # 等待系统初始化
-            logger.info("🔥 开始预热日程缓存...")
-            self._get_current_schedule("global")
-            logger.info("✅ 日程缓存预热完成")
-        except Exception as e:
-            logger.warning(f"缓存预热失败: {e}")
+        await asyncio.sleep(5)  # 等待系统初始化
+        logger.info("🔥 开始预热日程缓存...")
+        self._get_current_schedule("global")
+        logger.info("✅ 日程缓存预热完成")
 
+    @handle_exception("检查今天日程失败: {e}", log_level="warning", default_return=False)
     def _check_today_schedule_exists(self, chat_id: str = "global") -> bool:
         """
         检查今天是否已经有日程
@@ -174,48 +194,44 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         Returns:
             True表示今天已有日程，False表示没有
         """
-        try:
-            goal_manager = get_goal_manager()
-            goals = goal_manager.get_active_goals(chat_id=chat_id)
+        goal_manager = get_goal_manager()
+        goals = goal_manager.get_active_goals(chat_id=chat_id)
 
-            if not goals:
-                return False
-
-            # 获取今天的日期字符串
-            today_str = datetime.now().strftime("%Y-%m-%d")
-
-            # 检查是否有今天创建的带time_window的目标
-            for goal in goals:
-                # 检查是否有time_window（日程类型的标志）
-                has_time_window = False
-                if goal.parameters and "time_window" in goal.parameters:
-                    has_time_window = True
-                elif goal.conditions and "time_window" in goal.conditions:
-                    has_time_window = True
-
-                if has_time_window:
-                    # 检查创建时间是否是今天
-                    goal_date = None
-                    if goal.created_at:
-                        try:
-                            if isinstance(goal.created_at, str):
-                                goal_date = goal.created_at.split("T")[0]
-                            else:
-                                goal_date = goal.created_at.strftime("%Y-%m-%d")
-                        except Exception as e:
-                            logger.debug(f"解析目标创建时间失败: {goal.created_at} - {e}")
-
-                    if goal_date == today_str:
-                        logger.debug(f"找到今天的日程目标: {goal.name}")
-                        return True
-
-            logger.debug("今天还没有日程")
+        if not goals:
             return False
 
-        except Exception as e:
-            logger.warning(f"检查今天日程失败: {e}")
-            return False
+        # ✅ 获取配置的时区并计算今天的日期字符串
+        today_str = self._get_timezone_now().strftime("%Y-%m-%d")
 
+        # 检查是否有今天创建的带time_window的目标
+        for goal in goals:
+            # 检查是否有time_window（日程类型的标志）
+            has_time_window = False
+            if goal.parameters and "time_window" in goal.parameters:
+                has_time_window = True
+            elif goal.conditions and "time_window" in goal.conditions:
+                has_time_window = True
+
+            if has_time_window:
+                # 检查创建时间是否是今天
+                goal_date = None
+                if goal.created_at:
+                    try:
+                        if isinstance(goal.created_at, str):
+                            goal_date = goal.created_at.split("T")[0]
+                        else:
+                            goal_date = goal.created_at.strftime("%Y-%m-%d")
+                    except Exception as e:
+                        logger.debug(f"解析目标创建时间失败: {goal.created_at} - {e}")
+
+                if goal_date == today_str:
+                    logger.debug(f"找到今天的日程目标: {goal.name}")
+                    return True
+
+        logger.debug("今天还没有日程")
+        return False
+
+    @handle_exception("自动生成日程失败: {e}", log_level="error", exc_info=True, default_return=False)
     async def _auto_generate_today_schedule(self, user_id: str, chat_id: str = "global") -> bool:
         """
         自动生成今天的日程
@@ -229,61 +245,57 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         Returns:
             True表示生成成功，False表示失败
         """
-        try:
-            logger.info("🔄 开始自动生成今天的日程...")
+        logger.info("🔄 开始自动生成今天的日程...")
 
-            goal_manager = get_goal_manager()
+        goal_manager = get_goal_manager()
 
-            # 读取配置并传给ScheduleGenerator
-            schedule_config = {
-                "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", False),
-                "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 1),
-                "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.80),
-                "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 8),
-                "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
-                "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
-                "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
-                "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
-                "custom_prompt": self.get_config("autonomous_planning.schedule.custom_prompt", ""),
-                "custom_model": {
-                    "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
-                    "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),
-                    "api_base": self.get_config("autonomous_planning.schedule.custom_model.api_base", ""),
-                    "api_key": self.get_config("autonomous_planning.schedule.custom_model.api_key", ""),
-                    "provider": self.get_config("autonomous_planning.schedule.custom_model.provider", "openai"),
-                    "temperature": self.get_config("autonomous_planning.schedule.custom_model.temperature", 0.7),
-                },
-            }
-            schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
+        # 读取配置并传给ScheduleGenerator
+        schedule_config = {
+            "use_multi_round": self.get_config("autonomous_planning.schedule.use_multi_round", False),
+            "max_rounds": self.get_config("autonomous_planning.schedule.max_rounds", 1),
+            "quality_threshold": self.get_config("autonomous_planning.schedule.quality_threshold", 0.80),
+            "min_activities": self.get_config("autonomous_planning.schedule.min_activities", 8),
+            "max_activities": self.get_config("autonomous_planning.schedule.max_activities", 15),
+            "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
+            "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
+            "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
+            "custom_prompt": self.get_config("autonomous_planning.schedule.custom_prompt", ""),
+            "custom_model": {
+                "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
+                "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),
+                "api_base": self.get_config("autonomous_planning.schedule.custom_model.api_base", ""),
+                "api_key": self.get_config("autonomous_planning.schedule.custom_model.api_key", ""),
+                "provider": self.get_config("autonomous_planning.schedule.custom_model.provider", "openai"),
+                "temperature": self.get_config("autonomous_planning.schedule.custom_model.temperature", 0.7),
+            },
+        }
+        schedule_generator = ScheduleGenerator(goal_manager, config=schedule_config)
 
-            # 生成每日日程
-            schedule = await schedule_generator.generate_daily_schedule(
-                user_id=user_id,
-                chat_id=chat_id,
-                use_llm=True
-            )
+        # 生成每日日程
+        schedule = await schedule_generator.generate_daily_schedule(
+            user_id=user_id,
+            chat_id=chat_id,
+            use_llm=True
+        )
 
-            # 应用日程
-            created_ids = await schedule_generator.apply_schedule(
-                schedule=schedule,
-                user_id=user_id,
-                chat_id=chat_id
-            )
+        # 应用日程
+        created_ids = await schedule_generator.apply_schedule(
+            schedule=schedule,
+            user_id=user_id,
+            chat_id=chat_id
+        )
 
-            if created_ids:
-                logger.info(f"✅ 自动生成日程成功，创建了 {len(created_ids)} 个目标")
-                # 清理缓存，强制重新加载
-                self._schedule_cache.clear()
-                self._last_schedule_check_date = datetime.now().strftime("%Y-%m-%d")
-                return True
-            else:
-                logger.warning("⚠️ 日程生成失败，没有创建任何目标")
-                return False
-
-        except Exception as e:
-            logger.error(f"自动生成日程失败: {e}", exc_info=True)
+        if created_ids:
+            logger.info(f"✅ 自动生成日程成功，创建了 {len(created_ids)} 个目标")
+            # 清理缓存，强制重新加载
+            self._schedule_cache.clear()
+            self._last_schedule_check_date = datetime.now().strftime("%Y-%m-%d")
+            return True
+        else:
+            logger.warning("⚠️ 日程生成失败，没有创建任何目标")
             return False
 
+    @handle_exception("判断是否注入日程失败: {e}", log_level="warning", default_return=False)
     def _should_inject_schedule(self, message: MaiMessages) -> bool:
         """
         智能判断是否需要注入日程信息
@@ -299,43 +311,37 @@ class ScheduleInjectEventHandler(BaseEventHandler):
         Returns:
             是否需要注入日程
         """
-        try:
-            # 获取用户消息文本
-            user_message = ""
+        # 获取用户消息文本
+        user_message = ""
 
-            # 方式1: 从plain_text提取（MaiMessages标准属性）
-            if hasattr(message, 'plain_text') and message.plain_text:
-                user_message = str(message.plain_text)
-                logger.debug(f"从plain_text提取到用户消息: '{user_message}'")
+        # 方式1: 从plain_text提取（MaiMessages标准属性）
+        if hasattr(message, 'plain_text') and message.plain_text:
+            user_message = str(message.plain_text)
+            logger.debug(f"从plain_text提取到用户消息: '{user_message}'")
 
-            # 方式2: 从raw_message提取（备选）
-            if not user_message and hasattr(message, 'raw_message') and message.raw_message:
-                user_message = str(message.raw_message)
-                logger.debug(f"从raw_message提取到用户消息: '{user_message}'")
+        # 方式2: 从raw_message提取（备选）
+        if not user_message and hasattr(message, 'raw_message') and message.raw_message:
+            user_message = str(message.raw_message)
+            logger.debug(f"从raw_message提取到用户消息: '{user_message}'")
 
-            if not user_message:
-                logger.debug(f"未能提取到用户消息，跳过日程注入")
-                return False
-
-            # P1优化：使用预编译正则一次匹配所有关键词
-            match = self._TIME_KEYWORDS_PATTERN.search(user_message)
-            if match:
-                logger.info(f"检测到时间关键词: {match.group()}，将注入日程")
-                return True
-
-            # 规则2：短消息 + 问号（可能是询问）
-            if len(user_message) < 5 and "?" in user_message:
-                logger.info("检测到短消息问句，将注入日程")
-                return True
-
-            # 其他情况不注入
-            logger.debug("用户消息不涉及时间，跳过日程注入")
+        if not user_message:
+            logger.debug(f"未能提取到用户消息，跳过日程注入")
             return False
 
-        except Exception as e:
-            logger.warning(f"判断是否注入日程失败: {e}")
-            # 失败时保守策略：不注入
-            return False
+        # P1优化：使用预编译正则一次匹配所有关键词
+        match = self._TIME_KEYWORDS_PATTERN.search(user_message)
+        if match:
+            logger.info(f"检测到时间关键词: {match.group()}，将注入日程")
+            return True
+
+        # 规则2：短消息 + 问号（可能是询问）
+        if len(user_message) < 5 and "?" in user_message:
+            logger.info("检测到短消息问句，将注入日程")
+            return True
+
+        # 其他情况不注入
+        logger.debug("用户消息不涉及时间，跳过日程注入")
+        return False
 
     async def execute(
         self, message: MaiMessages | None

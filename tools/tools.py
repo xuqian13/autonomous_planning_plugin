@@ -20,6 +20,7 @@ from src.common.logger import get_logger
 from ..planner.goal_manager import get_goal_manager, GoalPriority, GoalStatus
 from ..planner.schedule_generator import ScheduleGenerator, ScheduleType
 from ..core.exceptions import InvalidParametersError, InvalidTimeWindowError
+from ..core.parameter_validator import ParameterValidator
 
 logger = get_logger("autonomous_planning.tools")
 
@@ -89,36 +90,9 @@ def _validate_parameters_schema(params: Dict[str, Any], goal_type: str = None) -
     if not isinstance(params, dict):
         raise InvalidParametersError("参数必须是字典类型", invalid_value=type(params).__name__)
 
-    # 验证 time_window
+    # 使用统一的参数验证器验证 time_window
     if "time_window" in params:
-        time_window = params["time_window"]
-        if not isinstance(time_window, list):
-            raise InvalidTimeWindowError(
-                f"time_window必须是列表，当前类型: {type(time_window).__name__}",
-                time_window=time_window
-            )
-        if len(time_window) != 2:
-            raise InvalidTimeWindowError(
-                f"time_window必须包含2个元素，当前: {len(time_window)}个",
-                time_window=time_window
-            )
-        if not all(isinstance(x, int) for x in time_window):
-            raise InvalidTimeWindowError(
-                f"time_window的元素必须是整数，当前: {[type(x).__name__ for x in time_window]}",
-                time_window=time_window
-            )
-        # 验证取值范围 (0-1440分钟 = 24小时)
-        start, end = time_window
-        if not (0 <= start < 1440 and 0 < end <= 1440):
-            raise InvalidTimeWindowError(
-                f"time_window的值必须在0-1440范围内，当前: {time_window}",
-                time_window=time_window
-            )
-        if start >= end:
-            raise InvalidTimeWindowError(
-                f"time_window的起始时间必须小于结束时间，当前: {time_window}",
-                time_window=time_window
-            )
+        ParameterValidator.validate_time_window(params["time_window"])
 
     # 验证 topics（learn_topic类型）
     if goal_type == "learn_topic":
@@ -414,48 +388,115 @@ class ManageGoalTool(BaseTool):
 
 
 class GetPlanningStatusTool(BaseTool):
-    """获取规划状态工具 - 查看活跃目标和执行历史"""
+    """获取规划状态工具 - 查看今日日程（简洁格式）"""
 
     name = "get_planning_status"
-    description = "查看麦麦的自主规划系统状态，包括活跃目标、执行历史等"
+    description = "查看今日日程安排，按时间顺序显示正在进行和即将到来的活动"
     parameters = [
         ("detailed", ToolParamType.BOOLEAN, "是否显示详细信息", False, None),
     ]
     available_for_llm = True
 
     async def execute(self, function_args: Dict[str, Any]) -> Dict[str, Any]:
-        """查询并返回规划系统状态"""
+        """查询并返回规划系统状态（简洁日程格式）"""
         try:
+            from datetime import datetime
             goal_manager = get_goal_manager()
+            detailed = function_args.get("detailed", False)
 
-            # 获取统计信息
-            all_goals = goal_manager.get_all_goals()
-            active_goals = goal_manager.get_active_goals()
+            # 获取所有目标
+            all_goals = goal_manager.get_all_goals(chat_id="global")
 
-            status_counts = {}
+            # 筛选出日程类型的目标（带 time_window）
+            schedule_goals = []
             for goal in all_goals:
-                status = goal.status.value
-                status_counts[status] = status_counts.get(status, 0) + 1
+                time_window = None
+                if goal.parameters and "time_window" in goal.parameters:
+                    time_window = goal.parameters["time_window"]
+                elif goal.conditions and "time_window" in goal.conditions:
+                    time_window = goal.conditions["time_window"]
 
-            # 构建状态报告
-            content = f"""🤖 麦麦自主规划系统状态
+                if time_window and isinstance(time_window, list) and len(time_window) == 2:
+                    schedule_goals.append((goal, time_window))
 
-📊 目标统计:
-   总目标数: {len(all_goals)}
-   活跃: {status_counts.get('active', 0)}
-   暂停: {status_counts.get('paused', 0)}
-   完成: {status_counts.get('completed', 0)}
-   取消: {status_counts.get('cancelled', 0)}
+            if not schedule_goals:
+                return {"type": "planning_status", "content": "📅 今天还没有日程"}
 
-🎯 当前活跃目标:"""
+            # 按时间排序
+            schedule_goals.sort(key=lambda x: x[1][0])
 
-            if active_goals:
-                for goal in active_goals[:5]:  # 只显示前5个
-                    content += f"\n\n{goal.get_summary()}"
-            else:
-                content += "\n   暂无活跃目标"
+            # 获取当前时间（分钟数）
+            now = datetime.now()
+            current_minutes = now.hour * 60 + now.minute
 
-            content += "\n\n💡 提示: 使用 manage_goal 工具可以创建新目标"
+            # 分类日程
+            ongoing = []  # 正在进行
+            upcoming = []  # 即将到来
+            completed = []  # 已完成
+
+            for goal, time_window in schedule_goals:
+                start_min, end_min = time_window
+
+                if start_min <= current_minutes <= end_min:
+                    ongoing.append((goal, time_window))
+                elif current_minutes < start_min:
+                    upcoming.append((goal, time_window))
+                else:  # current_minutes > end_min
+                    completed.append((goal, time_window))
+
+            # 构建简洁日程
+            def format_time(minutes):
+                """将分钟数转换为时间字符串"""
+                h = minutes // 60
+                m = minutes % 60
+                return f"{h:02d}:{m:02d}"
+
+            def format_schedule_item(goal, time_window, status_emoji=""):
+                """格式化单个日程项"""
+                start_time = format_time(time_window[0])
+                end_time = format_time(time_window[1])
+
+                # 获取目标描述（如果有）
+                desc = ""
+                if goal.parameters and "description" in goal.parameters:
+                    desc = goal.parameters["description"]
+                    if len(desc) > 30:
+                        desc = desc[:27] + "..."
+
+                if desc:
+                    return f"{status_emoji}{start_time}-{end_time} {goal.name}\n   💭 {desc}"
+                else:
+                    return f"{status_emoji}{start_time}-{end_time} {goal.name}"
+
+            # 构建输出
+            date_str = now.strftime("%Y-%m-%d")
+            weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+            weekday = weekday_names[now.weekday()]
+
+            content = f"📅 今日日程 {date_str} {weekday}\n"
+
+            if ongoing:
+                content += "\n🔵 正在进行:\n"
+                for goal, time_window in ongoing:
+                    content += format_schedule_item(goal, time_window, "▶️ ") + "\n"
+
+            if upcoming:
+                content += "\n⏰ 即将到来:\n"
+                for goal, time_window in upcoming[:5]:  # 最多显示5个
+                    content += format_schedule_item(goal, time_window) + "\n"
+
+                if len(upcoming) > 5:
+                    content += f"   ...还有 {len(upcoming) - 5} 个活动\n"
+
+            if completed and detailed:
+                content += "\n✅ 已完成:\n"
+                for goal, time_window in completed[-3:]:  # 只显示最近3个
+                    content += format_schedule_item(goal, time_window) + "\n"
+
+            # 统计信息
+            content += f"\n📊 共 {len(schedule_goals)} 个活动"
+            if not detailed:
+                content += " | 详情: detailed=true"
 
             return {"type": "planning_status", "content": content}
 
