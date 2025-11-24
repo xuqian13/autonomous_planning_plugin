@@ -244,6 +244,7 @@ class ScheduleInjectEventHandler(BaseEventHandler):
                 "min_description_length": self.get_config("autonomous_planning.schedule.min_description_length", 15),
                 "max_description_length": self.get_config("autonomous_planning.schedule.max_description_length", 50),
                 "max_tokens": self.get_config("autonomous_planning.schedule.max_tokens", 8192),
+                "custom_prompt": self.get_config("autonomous_planning.schedule.custom_prompt", ""),
                 "custom_model": {
                     "enabled": self.get_config("autonomous_planning.schedule.custom_model.enabled", False),
                     "model_name": self.get_config("autonomous_planning.schedule.custom_model.model_name", ""),

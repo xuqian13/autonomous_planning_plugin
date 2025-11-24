@@ -1716,72 +1716,69 @@ class ScheduleGenerator:
 
         prompt += f"""
 【任务】生成今天的详细日程JSON：
-1. {min_activities}-{max_activities}个活动，覆盖全天（00:00起床到睡觉）
-2. 每个description {min_desc_len}-{max_desc_len}字，用自然叙述风格（像日记）
-3. 体现人设：{personality[:50]}...
-4. 兴趣相关：{interest if interest else "日常生活"}
-5. 表达风格：{reply_style[:30] if reply_style else "自然随意"}
+1. {min_activities}-{max_activities}个活动，覆盖全天24小时（从00:00睡觉开始，到23:59结束形成闭环）
+2. 每个description {min_desc_len}-{max_desc_len}字，用自然叙述风格（像写日记一样）
+3. 体现人设特点：{personality[:80] if personality else "普通人"}
+4. 参考兴趣爱好：{interest if interest else "日常生活"}（注意：不需要每天都安排所有兴趣，随机选择1-2个即可）
+5. 表达风格：{reply_style[:50] if reply_style else "自然随意"}
+6. 保持自然随机：像真人一样，不是每天都做同样的事，有时候就是普通地学习、休息、发呆
 """
 
         # 如果有自定义prompt，强调一下
         if custom_prompt:
-            prompt += f"6. ⚠️ 优先满足上述【特殊要求】的内容\n"
+            prompt += f"7. ⚠️ 优先满足上述【特殊要求】的内容\n"
 
         prompt += """
 【活动类型】
-daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_maintenance(社交)|exercise(运动)|learn_topic(兴趣)|custom(其他)
+daily_routine(作息)|meal(吃饭)|study(学习)|entertainment(娱乐)|social_maintenance(社交)|exercise(运动)|learn_topic(兴趣)|rest(休息)|free_time(自由时间)|custom(其他)
 
 【JSON格式示例】
 {
   "schedule_items": [
-    {"name":"睡觉","description":"蜷在被窝里睡得很香","goal_type":"daily_routine","priority":"high","time_slot":"00:00","duration_hours":7.5},
-    {"name":"起床","description":"迷迷糊糊爬起来","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","duration_hours":0.25},
-    {"name":"早餐","description":"简单吃了点东西","goal_type":"meal","priority":"medium","time_slot":"08:00","duration_hours":0.5},
+    {"name":"睡觉","description":"蜷在温暖的被窝里睡得很香，做了个好梦","goal_type":"daily_routine","priority":"high","time_slot":"00:00","duration_hours":7.5},
+    {"name":"起床洗漱","description":"闹钟响了好几遍才迷迷糊糊爬起来，洗脸刷牙","goal_type":"daily_routine","priority":"medium","time_slot":"07:30","duration_hours":0.5},
     ..."""
 
-        prompt += f"""（继续{min_activities}-{max_activities}个活动）
+        prompt += f"""（继续生成到{min_activities}-{max_activities}个活动，覆盖全天到睡觉）
   ]
 }}
 
 ⚠️ 重要：duration_hours 表示活动的持续时长（小时），不是重复间隔！
 - 睡觉 00:00 持续7.5小时 → 结束于 07:30
-- 起床 07:30 持续0.25小时（15分钟） → 结束于 07:45
-- 早餐 08:00 持续0.5小时（30分钟） → 结束于 08:30
+- 起床洗漱 07:30 持续0.5小时 → 结束于 08:00
+- 早餐 08:00 持续0.5小时 → 结束于 08:30
 
-【时间合理性要求 - 重要！】
-⚠️ 必须同时满足以下两点：
-1. 无缝覆盖全天：每个活动结束时间 = 下个活动开始时间
-2. 遵守常识性时间安排，参考以下顺序：
-   • 00:00-07:30  睡觉 (7-8小时)
-   • 07:30-08:00  起床/洗漱
-   • 08:00-08:30  早餐 ← 必须在 06:00-09:00
-   • 08:30-12:00  上午活动（学习/娱乐/社交）
-   • 12:00-12:30  午餐 ← 必须在 11:00-14:00
-   • 12:30-18:00  下午活动
-   • 18:00-18:30  晚餐 ← 必须在 17:00-20:00
-   • 18:30-23:00  晚间活动（娱乐/社交/夜聊）
-   • 23:00-00:00  睡前准备 → 回到 00:00
+【时间安排要求】
+1. 合理覆盖全天：从00:00睡觉到23:00-24:00睡前，主要时段都应有活动安排
+2. ⚠️ 活动之间应该有5-15分钟的过渡时间（如路上时间、休息间隔），不要完全无缝衔接
+3. 遵守常识性时间安排：
+   • 00:00-07:30  睡觉（7-8小时）
+   • 07:30-08:30  起床、洗漱、早餐
+   • 08:30-12:00  上午活动
+   • 12:00-13:00  午餐（可包含午休）
+   • 13:00-18:00  下午活动
+   • 18:00-19:30  晚餐
+   • 19:30-23:00  晚间活动
+   • 23:00-00:00  睡前准备
+4. 三餐时间窗口：早餐6-9点、午餐11-14点、晚餐17-20点
 
 【要求】
 - 严格JSON格式，无注释
-- time_slot按时间递增（HH:MM格式）
-- ⚠️ 必须无缝覆盖全天：每个活动结束时间 = 下个活动开始时间，不能有空档
-- ⚠️ 关键活动时间必须合理：早餐6-9点、午餐11-14点、晚餐17-20点、睡觉从22-2点开始
-- description简洁自然，{min_desc_len}-{max_desc_len}字
-- 体现{weekday}特色（{"周末睡懒觉" if is_weekend else "工作日早起"}）
-- 符合心情{mood_seed}和活力{energy_level}
+- time_slot按时间递增（HH:MM格式，如08:30）
+- duration_hours要合理：吃饭0.5-1小时，睡觉7-8小时，学习1-3小时等
+- description简洁自然，{min_desc_len}-{max_desc_len}字，像写日记一样
+- 体现{weekday}特色（{"周末可以睡懒觉、多安排休闲娱乐" if is_weekend else "工作日节奏规律"}）
+- 活动多样性：不要每天都安排所有兴趣爱好，有的日子可能就是普通地学习、吃饭、休息，偶尔才会玩游戏/运动/社交
+- 根据今日状态调整：心情{mood_seed}/100{"（心情不错，可多安排社交活动）" if mood_seed > 60 else "（心情一般，适当安排轻松活动）" if mood_seed > 30 else "（心情低落，多安排休息放松）"}，活力{energy_level}/100{"（精力充沛，可安排运动或学习）" if energy_level > 60 else "（活力一般，适度安排）" if energy_level > 30 else "（比较疲惫，多休息少折腾）"}
 """
 
-        # 添加Schema约束（精简版）
+        # 添加Schema约束（精简版 - 只补充前面未提及的技术细节）
         if schema:
             prompt += f"""
-【Schema要求】
-- {min_activities}-{max_activities}个活动（必须）
-- 必填：name(2-20字), description({min_desc_len}-{max_desc_len}字), time_slot, goal_type, priority
-- priority: high/medium/low
-- duration_hours: 0.25-12（活动持续时长，小时）
-
-Schema: {json.dumps(schema.get('properties', {}).get('schedule_items', {}), ensure_ascii=False)}
+【技术规范】
+- 必填字段：name(2-20字), description, time_slot(HH:MM), goal_type, priority(high/medium/low)
+- duration_hours范围：0.25-12小时
+- goal_type必须是上述【活动类型】中的一种
 """
 
         return prompt
