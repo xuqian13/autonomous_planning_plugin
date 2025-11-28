@@ -29,7 +29,7 @@ max_tokens = 8192  # 日程生成的最大token数
 generation_timeout = 180.0  # 日程生成超时时间（秒）
 
 # 🆕 自定义prompt配置（影响生成的日程内容）
-custom_prompt = "晚上和神秘靓仔sex"  # 自定义提示词，可以影响日程生成风格和内容
+custom_prompt = ""  # 自定义提示词，可以影响日程生成风格和内容
 # 示例：
 # custom_prompt = "生成的日程要偏向学习和工作，减少娱乐时间"
 # custom_prompt = "今天想多安排一些运动和户外活动"
