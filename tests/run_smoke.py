@@ -52,7 +52,7 @@ import tempfile
 import tomllib
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent.parent
@@ -139,7 +139,7 @@ def mock_plugin(**schedule_overrides):
 
 @step("01. 插件包导入（cache 模块未缺失）")
 def test_pkg_import():
-    assert plugin_mod.__version__ == "4.4.3", f"version={plugin_mod.__version__}"
+    assert plugin_mod.__version__ == "4.4.5", f"version={plugin_mod.__version__}"
     cache_mod = imp("cache.lru_cache")
     c = cache_mod.LRUCache(max_size=2)
     c["a"] = 1; c["b"] = 2; c["c"] = 3
@@ -172,6 +172,8 @@ def test_components():
 @step("03. UI Section 渲染（4 个顶层 section + 字段 UI 元数据完整）")
 def test_ui_schema():
     inst = fresh_plugin()
+    assert inst.config.plugin.config_version == "4.4.5"
+    assert inst.config.schedule.auto_infer_next_day_prompt is True
     schema = inst.build_config_schema(plugin_id="x.y", plugin_name="t")
     sections = schema["sections"]
     assert set(sections.keys()) == {"plugin", "autonomous_planning", "schedule", "inject"}, \
@@ -220,7 +222,7 @@ def test_current_toml():
     assert isinstance(inst.config.schedule.inject_into_replyer, bool)
     # inject_mode 在 v4.2 起 deprecated 但保留向后兼容
     assert inst.config.inject.inject_mode in ("smart", "rule")
-    assert inst.config.plugin.config_version == "4.4.3"
+    assert inst.config.plugin.config_version == "4.4.5"
 
 
 @step("06. stream_filter 白名单匹配")
@@ -285,6 +287,7 @@ def test_prompt_builder():
     pb = pb_mod.PromptBuilder({}, tz_mod.TimezoneManager("Asia/Shanghai"))
     prompt = pb.build_schedule_prompt(
         "daily", {},
+        yesterday_context="昨天的日程:\n【06-18 周四】\n  06:40 乘坐热气球 — 在卡帕多奇亚看清晨奇岩地貌\n  20:00 欣赏星空",
         pending_commitments=[{"time": "14:00", "title": "打游戏", "notes": "周末"}],
         history_context="[12:30] 朵昕@群: 今天天气好",
         knowledge_context="麦麦喜欢油豆腐",
@@ -292,6 +295,9 @@ def test_prompt_builder():
     assert "今天需要纳入的约定" in prompt and "打游戏" in prompt
     assert "最近聊天背景" in prompt and "朵昕" in prompt
     assert "相关记忆参考" in prompt and "油豆腐" in prompt
+    assert "连续性要求" in prompt and "不要无理由回到默认学习、游戏、上班日常" in prompt
+    assert "先从最近一天摘要提取当前地点" in prompt
+    assert "禁止照抄示例活动名" in prompt
     assert "跨天活动支持" in prompt
 
 
@@ -412,14 +418,14 @@ def test_recent_schedule_summary():
 
     # 造 3 天历史：昨/前/大前
     for offset, acts in enumerate([
-        [("审稿", 8 * 60), ("写专栏", 14 * 60)],
+        [("写专栏", 14 * 60), ("审稿", 8 * 60)],
         [("回邮件", 8 * 60), ("整理藏书", 14 * 60)],
         [("审稿", 8 * 60), ("写专栏", 14 * 60)],
     ], start=1):
         day = now - _td(days=offset)
         for name, start_min in acts:
             g = gm.create_goal(
-                name=name, description=f"{name}的描述", goal_type="study",
+                name=name, description=f"{name}的描述，延续昨天的主线状态", goal_type="study",
                 creator_id="system", chat_id="global", priority="medium",
                 parameters={"time_window": [start_min, start_min + 120]},
             )
@@ -430,7 +436,9 @@ def test_recent_schedule_summary():
     # days=1 只看昨天
     s1 = loader.load_recent_schedule_summary(days=1)
     assert "审稿" in s1 and "写专栏" in s1
+    assert "延续昨天的主线状态" in s1
     assert "回邮件" not in s1, "days=1 不应看到前天"
+    assert s1.index("08:00 审稿") < s1.index("14:00 写专栏"), "昨日日程应按时间正序输出"
 
     # days=3 看 3 天
     s3 = loader.load_recent_schedule_summary(days=3)
@@ -448,21 +456,175 @@ def test_recent_schedule_summary():
 def test_auto_scheduler():
     sched_mod = imp("planner.auto_scheduler")
     inst = fresh_plugin()
+    s = sched_mod.ScheduleAutoScheduler(inst)
+    s._inferred_prompt_cache = {
+        "target_date": "2026-06-18",
+        "prompt": "明天在卡帕多奇亚醒来，第二天去乘坐热气球，次日晚上看星空，翌日收尾。",
+    }
+
+    effective = s._get_effective_custom_prompt("2026-06-18", "固定日程")
+    assert "明天" not in effective and "第二天" not in effective
+    assert "次日" not in effective and "翌日" not in effective
+    assert "今天在卡帕多奇亚醒来" in effective
+    assert "当天去乘坐热气球" in effective
+    assert "当天晚上看星空" in effective
+    assert "当天收尾" in effective
+    assert s._get_effective_custom_prompt("2026-06-19", "固定日程") == "固定日程"
 
     async def run():
-        s = sched_mod.ScheduleAutoScheduler(inst)
-        assert s.tz_manager.timezone_str == inst.config.schedule.timezone
+        scheduler = sched_mod.ScheduleAutoScheduler(inst)
+        assert scheduler.tz_manager.timezone_str == inst.config.schedule.timezone
         # 强制启用以走完 start 分支（验证 plugin.config.schedule.xxx 全部可访问）
         inst.config.schedule.auto_schedule_enabled = True
-        await s.start()
-        assert s.is_running is True
-        await s.stop()
-        assert s.is_running is False
+        await scheduler.start()
+        assert scheduler.is_running is True
+        await scheduler.stop()
+        assert scheduler.is_running is False
 
     asyncio.run(run())
 
 
-@step("16. energy_model 时段能量基线")
+@step("16. 模拟旅行连续性生成链路（6/18 旅行 → 6/19 承接）")
+def test_schedule_continuity_simulation():
+    """临时 DB + fake LLM，验证普通每日生成主链路会吃到旅行连续上下文。"""
+    from datetime import timedelta as _td
+
+    gm_mod = imp("planner.goal_manager")
+    sg_mod = imp("planner.schedule_generator")
+
+    frozen_now = datetime(2026, 6, 19, 8, 0)
+
+    class FrozenTimezoneManager:
+        def __init__(self, timezone_str: str = "Asia/Shanghai"):
+            self.timezone_str = timezone_str
+
+        def get_now(self):
+            return frozen_now
+
+    class FakeLLM:
+        def __init__(self):
+            self.prompts: list[str] = []
+
+        async def generate(self, *, prompt, model, max_tokens, temperature):
+            del model, max_tokens, temperature
+            self.prompts.append(prompt)
+            required = [
+                "今天是2026-06-19 周五",
+                "【连续性要求】",
+                "不要无理由回到默认学习、游戏、上班日常",
+                "06:40 乘坐热气球",
+                "卡帕多奇亚",
+                "先从最近一天摘要提取当前地点",
+            ]
+            missing = [text for text in required if text not in prompt]
+            if missing:
+                return {"success": False, "response": f"missing prompt evidence: {missing!r}"}
+            response = {
+                "schedule_items": [
+                    {"name": "睡觉", "description": "在卡帕多奇亚洞穴酒店继续睡到清晨", "goal_type": "daily_routine", "priority": "high", "time_slot": "00:00", "duration_hours": 7},
+                    {"name": "起床洗漱", "description": "洗漱收拾后准备继续逛格雷梅", "goal_type": "daily_routine", "priority": "medium", "time_slot": "07:00", "duration_hours": 0.5},
+                    {"name": "早餐", "description": "吃洞穴酒店早餐，翻昨天热气球照片", "goal_type": "meal", "priority": "high", "time_slot": "07:30", "duration_hours": 0.5},
+                    {"name": "露天博物馆参观", "description": "去格雷梅露天博物馆看洞穴教堂壁画", "goal_type": "custom", "priority": "high", "time_slot": "08:00", "duration_hours": 2.5},
+                    {"name": "洞穴教堂慢逛", "description": "细看壁画，把昨天奇岩地貌接到历史线", "goal_type": "learn_topic", "priority": "medium", "time_slot": "10:30", "duration_hours": 1},
+                    {"name": "午餐", "description": "吃当地风味午餐，顺便让腿缓一缓", "goal_type": "meal", "priority": "high", "time_slot": "11:30", "duration_hours": 1},
+                    {"name": "午休", "description": "回住处短躺，避免下午徒步直接掉线", "goal_type": "daily_routine", "priority": "medium", "time_slot": "12:30", "duration_hours": 0.5},
+                    {"name": "红谷轻徒步", "description": "去红谷看岩层颜色，承接昨天峡谷散步", "goal_type": "exercise", "priority": "medium", "time_slot": "13:00", "duration_hours": 2},
+                    {"name": "小镇买纪念品", "description": "在格雷梅挑纪念品，看看陶艺和地毯店", "goal_type": "custom", "priority": "medium", "time_slot": "15:00", "duration_hours": 1},
+                    {"name": "咖啡馆整理照片", "description": "整理热气球、星空和洞穴教堂照片", "goal_type": "custom", "priority": "medium", "time_slot": "16:00", "duration_hours": 1.5},
+                    {"name": "晚餐", "description": "晚餐吃当地热乎菜，给第二天旅程补能量", "goal_type": "meal", "priority": "high", "time_slot": "17:30", "duration_hours": 1},
+                    {"name": "观景台看日落", "description": "去观景台看奇岩日落，延续昨晚星空收束感", "goal_type": "custom", "priority": "medium", "time_slot": "18:30", "duration_hours": 1.5},
+                    {"name": "夜聊", "description": "和朋友聊洞穴教堂、红谷徒步和热气球照片", "goal_type": "social_maintenance", "priority": "medium", "time_slot": "20:00", "duration_hours": 1.5},
+                    {"name": "整理行李路线", "description": "整理行李和明天路线，别又手忙脚乱", "goal_type": "custom", "priority": "medium", "time_slot": "21:30", "duration_hours": 1},
+                    {"name": "睡前准备", "description": "洗漱后早点躺下，给后续旅程留体力", "goal_type": "daily_routine", "priority": "medium", "time_slot": "22:30", "duration_hours": 1.5},
+                ]
+            }
+            return {"success": True, "response": json.dumps(response, ensure_ascii=False)}
+
+    def create_yesterday_cappadocia_history(gm):
+        yesterday = frozen_now - _td(days=1)
+        activities = [
+            ("睡觉", "在卡帕多奇亚的洞穴酒店里睡到清晨，醒来前还带着旅行的疲惫感", "daily_routine", 0, 330),
+            ("起床洗漱", "清晨醒来洗漱收拾，准备赶热气球前的早饭和集合", "daily_routine", 330, 360),
+            ("当地特色早餐", "吃一份卡帕多奇亚当地早餐，喝热茶，先把状态拉起来", "meal", 360, 400),
+            ("乘坐热气球", "坐热气球升空，看卡帕多奇亚奇岩地貌和清晨的光线铺开", "custom", 400, 510),
+            ("地貌观景与拍照", "落地后在观景点慢慢看独特地貌，顺手整理几张照片", "custom", 510, 570),
+            ("附近小镇漫步", "在格雷梅附近慢慢走走，看看洞穴建筑和当地街巷氛围", "custom", 570, 690),
+            ("午餐", "午餐尝试当地风味，找个安静地方坐下来缓一缓", "meal", 690, 750),
+            ("午休", "午饭后回住处短暂休息，给下午的体验活动留点精神", "daily_routine", 750, 810),
+            ("学习当地手工技艺", "下午体验当地陶艺或手工技艺，边学边吐槽自己手笨", "learn_topic", 810, 930),
+            ("峡谷散步", "去玫瑰谷或鸽子谷附近散步，看傍晚光线里的岩层颜色", "exercise", 930, 1050),
+            ("当地特色晚餐", "晚餐品尝陶罐炖肉之类的当地美食，认真补充能量", "meal", 1050, 1110),
+            ("日落后放空", "饭后找个视野不错的地方坐一会儿，整理今天的照片和见闻", "custom", 1110, 1200),
+            ("欣赏星空", "晚上找开阔位置看星空，把这趟卡帕多奇亚的一天收束起来", "custom", 1200, 1290),
+            ("夜聊", "和朋友聊聊热气球、当地美食和今天看到的奇特地貌", "social_maintenance", 1290, 1350),
+            ("睡前准备", "洗漱收拾，准备早点睡，给明天的旅程留体力", "daily_routine", 1350, 1440),
+        ]
+        for name, description, goal_type, start_min, end_min in activities:
+            goal = gm.create_goal(
+                name=name, description=description, goal_type=goal_type,
+                creator_id="system", chat_id="global", priority="medium",
+                parameters={"time_window": [start_min, end_min]},
+            )
+            gm.db.update_goal(goal.goal_id, created_at=yesterday)
+
+    async def run():
+        gm = gm_mod.GoalManager(data_dir=str(Path(tempfile.mkdtemp())))
+        create_yesterday_cappadocia_history(gm)
+
+        fake_llm = FakeLLM()
+        plugin = MagicMock()
+        plugin.ctx.llm = fake_llm
+        plugin._plugin_root = None
+
+        config = {
+            "use_multi_round": False,
+            "min_activities": 8,
+            "max_activities": 15,
+            "enable_detailed_description": True,
+            "min_description_length": 10,
+            "max_description_length": 80,
+            "max_tokens": 8192,
+            "custom_prompt": "",
+            "timezone": "Asia/Shanghai",
+            "llm_task_name": "replyer",
+            "recent_schedule_days": 3,
+            "history_message_limit": 0,
+            "knowledge_search_limit": 0,
+            "llm_log_enabled": False,
+            "bot_profile": {
+                "personality": "旅行中的技术宅兽耳少女",
+                "reply_style": "短句嘴欠但靠谱",
+                "interest": "动漫、音乐、骑行和游戏",
+                "bot_name": "哈基米",
+            },
+        }
+
+        with patch(f"{PKG_NAME}.planner.goal_manager.TimezoneManager", FrozenTimezoneManager), \
+             patch(f"{PKG_NAME}.planner.schedule_generator.TimezoneManager", FrozenTimezoneManager), \
+             patch(f"{PKG_NAME}.planner.generator.base_generator.TimezoneManager", FrozenTimezoneManager):
+            generator = sg_mod.ScheduleGenerator(gm, config, plugin=plugin)
+            schedule = await generator.generate_daily_schedule(
+                user_id="system",
+                chat_id="global",
+                use_llm=True,
+                use_multi_round=False,
+            )
+
+        assert len(schedule.items) == 15
+        generated_text = "\n".join([item.name for item in schedule.items] + [item.description for item in schedule.items])
+        assert "学习线性代数" not in generated_text and "玩游戏" not in generated_text and "看动漫" not in generated_text
+        for term in ("露天博物馆", "洞穴教堂", "红谷", "热气球"):
+            assert term in generated_text, f"生成结果缺少旅行连续项: {term}"
+
+        captured_prompt = fake_llm.prompts[0]
+        assert "【连续性要求】" in captured_prompt
+        assert "06:40 乘坐热气球" in captured_prompt
+        assert "卡帕多奇亚" in captured_prompt
+
+    asyncio.run(run())
+
+
+@step("17. energy_model 时段能量基线")
 def test_energy_model():
     em = imp("utils.energy_model")
     # 时段能量曲线（极值）
@@ -484,7 +646,7 @@ def test_energy_model():
     assert em.get_energy_level(99) == em.get_energy_level(23)
 
 
-@step("17. InjectOptimizer 主动碎碎念配额 + 间隔 + 概率")
+@step("18. InjectOptimizer 主动碎碎念配额 + 间隔 + 概率")
 def test_proactive_inject():
     inj_mod = imp("handlers.inject.inject_optimizer")
     # 把概率拉到 1，去掉随机性；配额 2、间隔 0 秒
@@ -530,7 +692,7 @@ def test_proactive_inject():
     assert not ok and "间隔" in reason
 
 
-@step("18. 注入文本 v4.3 增强（state_hint + 精神状态 + 主动碎碎念语气切换）")
+@step("19. 注入文本 v4.3 增强（state_hint + 精神状态 + 主动碎碎念语气切换）")
 def test_v43_inject_enhancements():
     gm_mod = imp("planner.goal_manager")
     gm = gm_mod.GoalManager(data_dir=str(Path(tempfile.mkdtemp())))
@@ -602,7 +764,7 @@ def test_v43_inject_enhancements():
     asyncio.run(run_replyer())
 
 
-@step("19. _extract_last_user_text 跳过主程序元数据消息（v4.3.2/v4.4.1/v4.4.2 hotfix）")
+@step("20. _extract_last_user_text 跳过主程序元数据消息（v4.3.2/v4.4.1/v4.4.2 hotfix）")
 def test_extract_last_user_text_skip_time_prefix():
     inj_mod = imp("services.inject_service")
     extract = inj_mod.InjectService._extract_last_user_text
@@ -736,7 +898,7 @@ def test_extract_last_user_text_skip_time_prefix():
     assert intent_t == UserIntent.TECH_QUESTION, f"'怎么配置数据库连接'应判为 tech_question，实际 {intent_t}"
 
 
-@step("20. ProactiveService 主动发起 + 频率调控 + 多格式 stream 解析（v4.4 / v4.4.1）")
+@step("21. ProactiveService 主动发起 + 频率调控 + 多格式 stream 解析（v4.4 / v4.4.1）")
 def test_proactive_service():
     from unittest.mock import AsyncMock
 
@@ -890,6 +1052,7 @@ def main() -> int:
     test_replyer_inject()
     test_recent_schedule_summary()
     test_auto_scheduler()
+    test_schedule_continuity_simulation()
     test_energy_model()
     test_proactive_inject()
     test_v43_inject_enhancements()

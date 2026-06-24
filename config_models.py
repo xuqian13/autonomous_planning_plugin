@@ -50,7 +50,7 @@ class PluginSectionConfig(PluginConfigBase):
         },
     )
     config_version: str = Field(
-        default="4.4.4",
+        default="4.4.5",
         description="配置文件版本号",
         json_schema_extra={
             "label": "配置版本",
@@ -296,11 +296,11 @@ class ScheduleConfig(PluginConfigBase):
         },
     )
     auto_infer_next_day_prompt: bool = Field(
-        default=False,
-        description="是否在晚间根据近期活动自动推断次日策略提示词（实验功能）。",
+        default=True,
+        description="是否在晚间根据近期活动自动推断次日策略提示词。",
         json_schema_extra={
             "label": "次日策略推断",
-            "hint": "实验功能；晚间自动总结近期活动写入次日",
+            "hint": "晚间自动总结近期活动写入次日，保持日程连续演化",
             "order": 32,
         },
     )

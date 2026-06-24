@@ -37,6 +37,7 @@ from .generator import (
     ScheduleQualityScorer,
     ScheduleSemanticValidator,
 )
+from .generator.continuity_state import find_continuity_violations
 from .goal_manager import GoalManager
 
 logger = logging.getLogger(__name__)
@@ -243,7 +244,7 @@ class ScheduleGenerator:
             schedule_type=ScheduleType.DAILY,
             name=f"每日计划 - {self.tz_manager.get_now().strftime('%Y-%m-%d')}",
             items=schedule_items,
-            metadata={"preferences": preferences}
+            metadata={"preferences": preferences, "schedule_date": today_str}
         )
 
         logger.info(f"✅ 每日计划生成完成: {len(schedule_items)}个活动")
@@ -403,6 +404,15 @@ class ScheduleGenerator:
             try:
                 # 设置时间窗口
                 parameters = item.parameters.copy() if item.parameters else {}
+
+                # v4.4.6：显式记录日程所属日期。旧逻辑只按 created_at 判断日期，
+                # 一旦调度/测试在目标日前后创建记录，跨日上下文就会读错。
+                schedule_date = ""
+                if schedule.metadata:
+                    schedule_date = str(schedule.metadata.get("schedule_date") or "").strip()
+                if not schedule_date:
+                    schedule_date = self.tz_manager.get_now().strftime("%Y-%m-%d")
+                parameters["schedule_date"] = schedule_date
 
                 # v4.4.5：把匹配到的 commitment 元数据注入 parameters
                 commitment_meta = commitment_metadata_by_item_idx.get(idx)
@@ -617,14 +627,6 @@ class ScheduleGenerator:
             新生成的 Schedule 对象。
         """
         today_str = self.tz_manager.get_now().strftime("%Y-%m-%d")
-        existing = self.goal_manager.get_schedule_goals(chat_id=chat_id, date_str=today_str)
-        for goal in existing:
-            try:
-                self.goal_manager.delete_goal(goal.goal_id)
-            except Exception as exc:
-                logger.warning(f"删除旧日程失败: {goal.goal_id} - {exc}")
-        if existing:
-            logger.info(f"🧹 已清理 {len(existing)} 个今日旧日程，开始重新生成")
 
         # 临时叠加 extra_prompt 到 custom_prompt
         original_custom = self.config._raw_config.get("custom_prompt", "")
@@ -635,13 +637,25 @@ class ScheduleGenerator:
             self.base_generator.prompt_builder.config["custom_prompt"] = merged
 
         try:
+            # 先生成新日程，成功后才删旧的——防止生成失败导致今天变空。
             schedule = await self.generate_daily_schedule(
                 user_id=user_id,
                 chat_id=chat_id,
                 use_llm=True,
                 force_regenerate=True,
             )
+
             if auto_apply:
+                # 删旧 → 落新，保证原子感（删旧失败不影响落新）
+                existing = self.goal_manager.get_schedule_goals(chat_id=chat_id, date_str=today_str)
+                for goal in existing:
+                    try:
+                        self.goal_manager.delete_goal(goal.goal_id)
+                    except Exception as exc:
+                        logger.warning(f"删除旧日程失败: {goal.goal_id} - {exc}")
+                if existing:
+                    logger.info(f"🧹 已清理 {len(existing)} 个今日旧日程，应用新日程")
+
                 await self.apply_schedule(schedule=schedule, user_id=user_id, chat_id=chat_id)
             return schedule
         finally:
@@ -668,6 +682,7 @@ class ScheduleGenerator:
         best_schedule = None
         best_score = 0
         validation_warnings = []
+        best_blocking_warnings: List[str] = []
 
         for round_num in range(1, max_rounds + 1):
             logger.debug(f"🔄 第{round_num}轮生成...")
@@ -691,18 +706,26 @@ class ScheduleGenerator:
 
                 # 验证和评分
                 validated_items, warnings = self.validator.validate(raw_items)
+                warnings.extend(self._validate_continuity_against_context(validated_items))
                 score = self.quality_scorer.calculate_score(validated_items, warnings)
+                blocking_warnings = self._extract_blocking_warnings(warnings)
 
                 logger.debug(f"📊 第{round_num}轮质量分数: {score:.2f}")
 
                 # 更新最佳结果
-                if score > best_score:
+                should_replace_best = (
+                    best_schedule is None
+                    or (best_blocking_warnings and not blocking_warnings)
+                    or (bool(best_blocking_warnings) == bool(blocking_warnings) and score > best_score)
+                )
+                if should_replace_best:
                     best_schedule = validated_items
                     best_score = score
                     validation_warnings = warnings
+                    best_blocking_warnings = blocking_warnings
 
                 # 如果分数足够高，提前结束
-                if score >= quality_threshold:
+                if score >= quality_threshold and not blocking_warnings:
                     logger.debug(f"✅ 质量达标，结束生成")
                     break
 
@@ -724,6 +747,13 @@ class ScheduleGenerator:
             raise ScheduleGenerationError(
                 f"多轮生成全部失败（尝试了{max_rounds}轮）",
                 attempt_count=max_rounds
+            )
+
+        if best_blocking_warnings:
+            raise ScheduleGenerationError(
+                "多轮生成未通过连续性硬约束，拒绝应用会丢失近期主线的日程："
+                + "；".join(best_blocking_warnings[:3]),
+                attempt_count=max_rounds,
             )
 
         # 转换为ScheduleItem对象
@@ -753,17 +783,41 @@ class ScheduleGenerator:
 
         # 验证
         validated_items, warnings = self.validator.validate(raw_items)
+        warnings.extend(self._validate_continuity_against_context(validated_items))
+        blocking_warnings = self._extract_blocking_warnings(warnings)
 
         if warnings:
             logger.warning(f"语义验证发现 {len(warnings)} 个问题")
             for warning in warnings[:3]:
                 logger.warning(f"  ⚠️ {warning}")
 
+        if blocking_warnings:
+            raise ScheduleGenerationError(
+                "日程生成未通过连续性硬约束，拒绝应用会丢失近期主线的日程："
+                + "；".join(blocking_warnings[:3]),
+                attempt_count=1,
+            )
+
         # 转换为ScheduleItem对象
         schedule_items = self._dict_to_schedule_items(validated_items)
 
         logger.info(f"✅ 生成 {len(schedule_items)} 个日程项")
         return schedule_items
+
+    def _validate_continuity_against_context(self, items: List[Dict[str, Any]]) -> List[str]:
+        """Validate generated items against recent schedule continuity state."""
+        raw_cfg = self.config._raw_config if hasattr(self.config, "_raw_config") else {}
+        if not bool(raw_cfg.get("continuity_validation_enabled", True)):
+            return []
+        recent_summary = self.base_generator.yesterday_schedule_summary or ""
+        if not recent_summary:
+            return []
+        return find_continuity_violations(items, recent_summary)
+
+    @staticmethod
+    def _extract_blocking_warnings(warnings: List[str]) -> List[str]:
+        """Continuity warnings are hard constraints, not cosmetic quality issues."""
+        return [warning for warning in warnings if "连续性硬约束" in warning]
 
     async def _call_llm(self, prompt: str) -> List[Dict[str, Any]]:
         """调用 LLM 并解析响应（v4：通过 ctx.llm.generate）
@@ -784,11 +838,16 @@ class ScheduleGenerator:
         if self._plugin is None:
             raise LLMError("ScheduleGenerator 未注入 plugin 实例，无法调用 ctx.llm.generate")
 
+        # 把配置的 generation_timeout（秒）转为 RPC timeout_ms，突破默认 30s 限制。
+        gen_timeout_sec = float(getattr(self.config, 'generation_timeout', 180.0) or 180.0)
+        rpc_timeout_ms = max(60_000, int(gen_timeout_sec * 1000))
+
         llm_result = await self._plugin.ctx.llm.generate(
             prompt=prompt,
             model=task_name,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout_ms=rpc_timeout_ms,
         )
         success = bool(llm_result.get("success", False))
         response = str(llm_result.get("response", ""))
@@ -807,7 +866,7 @@ class ScheduleGenerator:
                 raise LLMRateLimitError(f"LLM速率限制: {response}", retry_after_seconds=10)
 
             if any(kw in error_msg for kw in ["timeout", "timed out", "超时"]):
-                raise LLMTimeoutError(f"LLM调用超时: {response}", timeout_seconds=30)
+                raise LLMTimeoutError(f"LLM调用超时: {response}", timeout_seconds=int(gen_timeout_sec))
 
             raise LLMError(f"LLM调用失败: {response}")
 

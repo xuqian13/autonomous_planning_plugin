@@ -256,10 +256,13 @@ class ScheduleAutoScheduler:
 
         instruction = (
             "你是日程策略设计助手。"
-            "请基于最近几天的日程与完成状态，为明天生成一段中文'策略提示词'，用于指导明日日程生成。"
+            "请基于最近几天的日程与完成状态，为下面给出的目标日期生成一段中文'策略提示词'，"
+            "用于指导该目标日期的日程生成。"
             "输出必须是单段纯文本，不要Markdown、不要列表、不要解释。"
             f"长度控制在120到{max_chars}字之间，强调连续性与现实可执行性。"
             "如果基础要求存在，必须兼容且优先满足。"
+            "这段策略会在目标日期当天作为【特殊要求】使用，所以必须从目标日期当天视角描述，"
+            "使用'今天'或'当天'，禁止使用'明天'、'明日'、'次日'、'翌日'、'第二天'等相对未来词。"
         )
 
         prompt = (
@@ -295,6 +298,7 @@ class ScheduleAutoScheduler:
             inferred_prompt = str(response).strip().replace("```", "")
             inferred_prompt = " ".join(inferred_prompt.split())
             inferred_prompt = inferred_prompt.strip("\"' ")
+            inferred_prompt = self._normalize_inferred_prompt_for_target_day(inferred_prompt)
             if len(inferred_prompt) > max_chars:
                 inferred_prompt = inferred_prompt[:max_chars].rstrip()
 
@@ -311,15 +315,38 @@ class ScheduleAutoScheduler:
             self.logger.info(f"✅ 次日策略推断成功，目标日期: {target_date}")
             return True
         except Exception as e:
-            self.logger.warning(f"次日策略推断异常，已回退固定prompt: {e}", exc_info=True)
+            self.logger.warning(f"次日策略推断异常，未写入次日策略: {e}", exc_info=True)
             return False
 
-    def _get_effective_custom_prompt(self, today: str, fallback_prompt: str) -> str:
+    @staticmethod
+    def _normalize_inferred_prompt_for_target_day(prompt: str) -> str:
+        """把次日策略从"未来视角"改成目标日当天视角。
+
+        推断发生在前一晚，LLM 很容易输出"明天去..."。这段文本在第二天
+        00:30 会被直接塞进生成 prompt 的【特殊要求】，如果仍写"明天"，
+        模型就会把它理解成后一天的安排，从而回落到默认兴趣/学习日程。
+        """
+        normalized = str(prompt or "").strip()
+        replacements = {
+            "第二天": "当天",
+            "次日": "当天",
+            "翌日": "当天",
+            "明日": "今日",
+            "明天": "今天",
+        }
+        for old, new in replacements.items():
+            normalized = normalized.replace(old, new)
+        return normalized
+
+    def _get_effective_custom_prompt(self, today: str, configured_prompt: str) -> str:
         inferred_date = str(self._inferred_prompt_cache.get("target_date", "") or "")
         inferred_prompt = str(self._inferred_prompt_cache.get("prompt", "") or "").strip()
         if inferred_date == today and inferred_prompt:
-            return inferred_prompt
-        return fallback_prompt
+            normalized_prompt = self._normalize_inferred_prompt_for_target_day(inferred_prompt)
+            if normalized_prompt != inferred_prompt:
+                self.logger.info("已将次日推断策略改写为目标日当天视角")
+            return normalized_prompt
+        return configured_prompt
 
     async def _schedule_loop(self):
         """
@@ -430,9 +457,9 @@ class ScheduleAutoScheduler:
             # 不再用 schedule.model_dump()（会漏掉 bot_profile 字段，导致 prompt
             # 中"未配置或为空"报错）
             schedule_config = self.plugin.build_schedule_config()
-            fallback_prompt = str(schedule_config.get("custom_prompt", "") or "")
-            effective_prompt = self._get_effective_custom_prompt(today, fallback_prompt)
-            if effective_prompt != fallback_prompt:
+            configured_prompt = str(schedule_config.get("custom_prompt", "") or "")
+            effective_prompt = self._get_effective_custom_prompt(today, configured_prompt)
+            if effective_prompt != configured_prompt:
                 schedule_config["custom_prompt"] = effective_prompt
                 self.logger.info("已应用次日推断策略到今日日程生成")
 
