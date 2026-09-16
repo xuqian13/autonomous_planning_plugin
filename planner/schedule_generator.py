@@ -784,9 +784,10 @@ class ScheduleGenerator:
         if self._plugin is None:
             raise LLMError("ScheduleGenerator 未注入 plugin 实例，无法调用 ctx.llm.generate")
 
+        # SDK 2.8+：任务名必须通过 task_name 传递，model 仅表示具体模型名。
         llm_result = await self._plugin.ctx.llm.generate(
             prompt=prompt,
-            model=task_name,
+            task_name=task_name,
             max_tokens=max_tokens,
             temperature=temperature,
         )

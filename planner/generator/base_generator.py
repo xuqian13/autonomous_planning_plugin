@@ -67,7 +67,7 @@ class BaseScheduleGenerator:
         """获取 LLM 调用参数。
 
         返回主程序 ``model_config.toml`` 中预先配置的任务名字符串，由
-        ScheduleGenerator 在调用 ``ctx.llm.generate(model=task_name, ...)`` 时使用。
+        ScheduleGenerator 在调用 ``ctx.llm.generate(task_name=task_name, ...)`` 时使用。
 
         Returns:
             ``(task_name, max_tokens, temperature)`` 三元组

@@ -148,9 +148,10 @@ async def judge_schedule_request(
     )
 
     try:
+        # SDK 2.8+：任务名必须通过 task_name 传递，model 仅表示具体模型名。
         result = await plugin.ctx.llm.generate(
             prompt=prompt,
-            model=model,
+            task_name=model,
             temperature=temperature,
             max_tokens=max_tokens,
         )
