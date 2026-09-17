@@ -834,9 +834,9 @@ class ScheduleGenerator:
         log_dir = raw.get("llm_log_dir")
         if not log_dir:
             # plugin 未注入路径时跳过（测试场景）
-            if self._plugin is None or not hasattr(self._plugin, "_plugin_root"):
+            if self._plugin is None or not hasattr(self._plugin, "_data_dir"):
                 return
-            log_dir = self._plugin._plugin_root / "data" / "llm_logs"
+            log_dir = self._plugin._data_dir / "llm_logs"
         from pathlib import Path
         log_llm_call(call_type, prompt, response, model, success, Path(log_dir))
 

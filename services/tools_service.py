@@ -607,7 +607,7 @@ class ToolsService:
                 current_activities.append({"time": time_label, "name": goal.name})
             persona = str(getattr(self._plugin, "_bot_profile", {}).get("personality", "")) or ""
 
-            log_dir = self._plugin._plugin_root / "data" / "llm_logs"
+            log_dir = self._plugin._data_dir / "llm_logs"
             parsed = await judge_schedule_request(
                 self._plugin,
                 description=description,

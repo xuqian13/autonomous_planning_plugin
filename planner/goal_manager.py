@@ -32,7 +32,7 @@ Example:
 from datetime import datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import logging
 import uuid
 
@@ -917,15 +917,20 @@ class GoalManager:
 _goal_manager: Optional[GoalManager] = None
 
 
-def get_goal_manager() -> GoalManager:
+def get_goal_manager(data_dir: Optional[Union[str, Path]] = None) -> GoalManager:
     """Get global goal manager instance.
+
+    Args:
+        data_dir: 持久化目录。仅在**首次**创建单例时生效；传入 ``None`` 时沿用
+            ``GoalManager`` 的默认值（插件源码目录下的 ``data/``）。插件
+            ``on_load`` 会用 Host 分配的统一目录调用一次，以固定单例的数据位置。
 
     Returns:
         GoalManager singleton instance
     """
     global _goal_manager
     if _goal_manager is None:
-        _goal_manager = GoalManager()
+        _goal_manager = GoalManager(data_dir=str(data_dir) if data_dir else None)
     return _goal_manager
 
 
