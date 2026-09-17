@@ -68,7 +68,13 @@ class ScheduleAutoScheduler:
         self._last_schedule_date: Optional[str] = None
         self._last_infer_date: Optional[str] = None
         self._inferred_prompt_cache: dict = {}
-        self._inferred_prompt_file = Path(__file__).resolve().parents[1] / "data" / "next_day_prompt.json"
+        # 持久化数据目录由插件在 on_load 中解析（Host 统一目录）；测试桩可能没有
+        # _data_dir，回退到源码目录下的 data/。调度器在 on_load 之后才构造，
+        # 此处读取已能拿到最终值。
+        data_dir = getattr(plugin, "_data_dir", None)
+        if data_dir is None:
+            data_dir = Path(__file__).resolve().parents[1] / "data"
+        self._inferred_prompt_file = Path(data_dir) / "next_day_prompt.json"
         self._load_inferred_prompt_cache()
 
         # 导入依赖（延迟导入避免循环依赖）

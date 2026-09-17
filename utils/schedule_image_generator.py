@@ -35,7 +35,7 @@ Example:
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import base64
 import io
 import logging
@@ -711,7 +711,8 @@ class ScheduleImageGenerator:
         cls,
         title: str,
         schedule_items: List[Dict[str, Any]],
-        width: int = None
+        width: int = None,
+        output_dir: Optional[Path] = None,
     ) -> Tuple[str, str]:
         """生成日程图片（重构版：清晰的流程编排）
 
@@ -722,10 +723,15 @@ class ScheduleImageGenerator:
             title: 标题文字
             schedule_items: 日程项列表
             width: 图片宽度（None=使用默认1280）
+            output_dir: 图片输出目录（插件持久化目录）；为 None 时回退到源码
+                ``data/images/``，供未进入 Runner 的测试场景使用。
 
         Returns:
             (图片路径, base64编码字符串)
         """
+        save_path = (
+            Path(output_dir) / "schedule_today.jpg" if output_dir else cls.SCHEDULE_IMAGE_PATH
+        )
         # 并发控制：最多3个并发生成
         cls._generation_semaphore.acquire()
 
@@ -753,21 +759,21 @@ class ScheduleImageGenerator:
             cls._add_signature(img, draw, overlay, width, height)
 
             # 7️⃣ 保存并编码：确保目录存在，转换格式，保存文件，生成base64
-            cls.SCHEDULE_IMAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
 
             # 转换为RGB格式（JPEG不支持透明度）
             rgb_img = Image.new('RGB', img.size, (240, 245, 252))
             rgb_img.paste(img, (0, 0))
 
             # 保存为JPEG，质量85%（平衡清晰度和文件大小）
-            rgb_img.save(str(cls.SCHEDULE_IMAGE_PATH), format='JPEG', quality=85, optimize=True)
+            rgb_img.save(str(save_path), format='JPEG', quality=85, optimize=True)
 
             # 生成base64编码（用于发送）
             img_byte_arr = io.BytesIO()
             rgb_img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
             img_base64 = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
 
-            return str(cls.SCHEDULE_IMAGE_PATH), img_base64
+            return str(save_path), img_base64
 
         finally:
             # 确保释放信号量（即使发生异常）

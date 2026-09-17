@@ -86,7 +86,7 @@ class CleanupService:
         if cfg.llm_log_enabled:
             try:
                 from ..utils.llm_logger import cleanup_old_logs
-                log_dir = self._plugin._plugin_root / "data" / "llm_logs"
+                log_dir = self._plugin._data_dir / "llm_logs"
                 deleted = cleanup_old_logs(log_dir, cfg.llm_log_retention_days)
                 if deleted > 0:
                     logger.info(f"🧹 清理了 {deleted} 个过期 LLM 日志")

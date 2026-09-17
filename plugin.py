@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Tuple
 import asyncio
 import logging
+import shutil
 
 from maibot_sdk import API, Command, EventHandler, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import EventType, HookMode, HookOrder, ToolParameterInfo, ToolParamType
@@ -143,6 +144,9 @@ class AutonomousPlanningPluginV4(MaiBotPlugin):
         """初始化插件基础字段，service 实例延迟到 ``on_load`` 创建。"""
         super().__init__()
         self._plugin_root: Path = Path(__file__).resolve().parent
+        # 持久化根目录：on_load 时会按 Host 分配的 ctx.paths.data_dir 覆盖；
+        # 此处先给旧式源码目录兜底，保证未进入 Runner（如单测）时路径仍可用。
+        self._data_dir: Path = self._plugin_root / "data"
         self._tools_svc: ToolsService | None = None
         self._cmd_svc: CommandService | None = None
         self._inject_svc: InjectService | None = None
@@ -178,6 +182,59 @@ class AutonomousPlanningPluginV4(MaiBotPlugin):
         return normalized, did_migrate or did_downgrade or default_changed
 
     # ============================================================
+    # 持久化目录解析与迁移
+    # ============================================================
+
+    def _resolve_data_dir(self) -> Path:
+        """解析插件持久化根目录。
+
+        MaiBot 1.2 起由 Host 通过 ``ctx.paths.data_dir`` 分配统一持久化目录
+        （``<项目根>/data/plugins/<plugin_id>/``），把数据写进插件源码目录已被
+        Host 标记为旧式用法——源码目录会被 ``git pull`` / 重装 / 重新 clone 覆盖，
+        数据随之丢失。
+
+        旧版 Host 或单测环境没有注入 ``paths`` 时，回退到源码目录下的 ``data/``。
+
+        Returns:
+            持久化根目录（不保证已存在）。
+        """
+        paths = getattr(getattr(self, "_ctx", None), "paths", None)
+        data_dir = getattr(paths, "data_dir", None)
+        if data_dir:
+            return Path(data_dir)
+        return self._plugin_root / "data"
+
+    def _migrate_legacy_data(self, data_dir: Path) -> None:
+        """把旧式源码目录 ``data/`` 的数据一次性搬到统一持久化目录。
+
+        仅在目标目录尚未建立 ``goals.db`` 时执行，且用**复制**而非移动：旧文件
+        原样保留作为回退，迁移失败也不影响以新目录启动。整个迁移失败不阻断加载。
+
+        Args:
+            data_dir: 目标持久化根目录。
+        """
+        legacy_dir = self._plugin_root / "data"
+        try:
+            if legacy_dir.resolve() == Path(data_dir).resolve():
+                return
+            if not legacy_dir.is_dir():
+                return
+
+            # WAL 模式下 -wal/-shm 与主库同源，必须整体复制才能得到一致快照
+            if (data_dir / "goals.db").exists():
+                return
+
+            data_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(legacy_dir, data_dir, dirs_exist_ok=True)
+            logger.info(
+                "[v4] 已将旧数据目录迁移到统一持久化目录：%s -> %s（旧文件保留作回退）",
+                legacy_dir,
+                data_dir,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[v4] 旧数据目录迁移失败，继续使用新目录启动: %s", exc)
+
+    # ============================================================
     # 生命周期
     # ============================================================
 
@@ -188,9 +245,16 @@ class AutonomousPlanningPluginV4(MaiBotPlugin):
             logger.warning("[v4] 插件已禁用（plugin.enabled=False），跳过初始化")
             return
 
-        data_dir = self._plugin_root / "data"
-        data_dir.mkdir(exist_ok=True)
+        data_dir = self._resolve_data_dir()
+        self._migrate_legacy_data(data_dir)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        self._data_dir = data_dir
         db_path = str(data_dir / "goals.db")
+
+        # 目标库全局单例按统一目录建立：GoalManager() 的默认值仍指向源码 data/，
+        # 必须在此显式传入，否则各 service 走单例时会写回旧目录。
+        from .planner.goal_manager import get_goal_manager
+        get_goal_manager(data_dir=str(data_dir))
 
         # v4 新增：预拉取 bot 全局配置（personality / bot.nickname 等）一次性缓存
         # PromptBuilder 不再运行时调用 config_api.get_global_config

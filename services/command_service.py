@@ -242,6 +242,7 @@ class CommandService:
                 ScheduleImageGenerator.generate_schedule_image,
                 title=title,
                 schedule_items=schedule_items,
+                output_dir=self._plugin._data_dir / "images",
             )
             if not stream_id:
                 logger.warning("无 stream_id，跳过图片发送")
